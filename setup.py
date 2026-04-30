@@ -20,7 +20,7 @@ def find_packages(where, exclude=None):
 setup(
     name='pyarea',
     author='Ioan Ferencik',
-    author_email='ioan.ferencik@solargis.com',
+    author_email='ferencikioan@gmail.com',
     version='0.1',
     packages=['pyarea', 'pyarea.navigation'],
     license='LGPL',
