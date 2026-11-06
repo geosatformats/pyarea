@@ -327,7 +327,7 @@ class AreaFile(BytesIO):
         """The image of a single-band file as a ``(lines, elements)`` array."""
         if self.num_bands != 1:
             raise ValueError(f'{self.source}: read_data() is for single-band files, this one has {self.num_bands}; '
-                             f'use read_channel() (Mode AAA) or read_ir_temperature_mode_aa() (Mode AA).')
+                             f'use read_channel() (Mode AAA) or read_ir_temperature_aa() (Mode AA).')
         return self.data[0]
 
     def _gather_slot(self, slots, present):
@@ -390,7 +390,7 @@ class AreaFile(BytesIO):
         present = match.any(axis=1)
         return self._gather_slot(np.where(present, match.argmax(axis=1), 0), present).astype(np.float64), present
 
-    def read_ir_temperature_mode_aa(self, band):
+    def read_ir_temperature_aa(self, band):
         """Mode AA brightness temperature (K) of IR band 1-12 as float32, NaN where it is missing."""
         if self.source_type != 'VAS':
             raise ValueError(f"{self.source}: not a Mode AA ('VAS') file.")
@@ -404,13 +404,13 @@ class AreaFile(BytesIO):
         t = mode_aa_temperature(raw, delta_f, ysubz, band)
         return np.where(valid_line[:, None], t, np.nan).astype(np.float32)
 
-    def read_ir_temperature(self):
+    def read_ir_temperature_a(self):
         """Mode A (single band) IR brightness temperature (K) as float32."""
         if self.directory.band != 'IR':
             raise ValueError(f'{self.source}: band is {self.directory.band!r}, not IR.')
         if self.source_type in ('AAA', 'VAS'):
             raise NotImplementedError(f'{self.source}: this is a multiband {self.source_type!r} file; use '
-                                      f'read_ir_temperature_aaa() or read_ir_temperature_mode_aa().')
+                                      f'read_ir_temperature_aaa() or read_ir_temperature_aa().')
         counts = self.read_data()
         if counts.max() > 255:
             raise ValueError(f'{self.source}: raw values exceed 8 bits (max {counts.max()}).')

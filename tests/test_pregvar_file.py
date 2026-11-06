@@ -94,7 +94,7 @@ class TestModeA:
         """Apply the documented two-piece VISSR formula."""
         counts = np.array([0, 100, 175, 176, 200, 255])
         expected = np.where(counts >= 176, 418.0 - counts, 330.0 - counts / 2.0)
-        temperature = AreaFile(mode_a_ir_file).read_ir_temperature()
+        temperature = AreaFile(mode_a_ir_file).read_ir_temperature_a()
         assert temperature.dtype == np.float32
         np.testing.assert_allclose(temperature[NADIR_ROW, :6], expected)
 
@@ -116,19 +116,19 @@ class TestModeA:
     def test_temperature_of_a_visible_file(self, mode_a_vis_file):
         """The IR formula does not apply to visible data."""
         with pytest.raises(ValueError, match="not IR"):
-            AreaFile(mode_a_vis_file).read_ir_temperature()
+            AreaFile(mode_a_vis_file).read_ir_temperature_a()
 
     def test_temperature_of_a_multiband_file(self, goes7_aaa_file):
         """The single-band formula does not apply to multiband files."""
         with pytest.raises(NotImplementedError, match="multiband"):
-            AreaFile(goes7_aaa_file).read_ir_temperature()
+            AreaFile(goes7_aaa_file).read_ir_temperature_a()
 
     def test_temperature_of_wide_counts(self, tmp_path):
         """The formula assumes 8-bit counts."""
         spec = FakeArea(GOES3_IR, np.full((SHAPE[0], SHAPE[1], 1), 300), bytes_per_elem=2, **IR_WINDOW)
         area = AreaFile(write_area_file(tmp_path / "goes03.1979.234.1515.AREA_IR", spec))
         with pytest.raises(ValueError, match="8 bits"):
-            area.read_ir_temperature()
+            area.read_ir_temperature_a()
 
     def test_visible_counts_of_an_infrared_file(self, mode_a_ir_file):
         """Visible counts only exist for visible files."""
@@ -155,29 +155,29 @@ class TestModeAA:
         """Subtract the offset, scale to radiance and invert the Planck function."""
         corrected = 10000 - 400  # already a multiple of 8
         expected = planck_temperature(corrected * 2.0 ** (0 - 7), (8512, 1286, 0.3212, 0.9974))
-        res = AreaFile(mode_aa_file).read_ir_temperature_mode_aa(8)
+        res = AreaFile(mode_aa_file).read_ir_temperature_aa(8)
         assert res.dtype == np.float32
         assert res[NADIR_ROW, NADIR_COL] == pytest.approx(expected, abs=1e-3)
         assert 200 < expected < 330
 
     def test_channel_missing_on_all_lines_is_nan(self, mode_aa_file):
         """A band without calibration entry has no data."""
-        assert np.isnan(AreaFile(mode_aa_file).read_ir_temperature_mode_aa(7)).all()
+        assert np.isnan(AreaFile(mode_aa_file).read_ir_temperature_aa(7)).all()
 
     def test_zero_counts_are_nan(self, tmp_path):
         """Counts of zero are the no-data value."""
         area = AreaFile(write_area_file(tmp_path / "goes05.1983.229.2231-2.AREA_IR", mode_aa_spec(raw=0)))
-        assert np.isnan(area.read_ir_temperature_mode_aa(8)).all()
+        assert np.isnan(area.read_ir_temperature_aa(8)).all()
 
     def test_request_for_another_format(self, mode_a_ir_file):
         """Mode AA temperatures only exist for Mode AA files."""
         with pytest.raises(ValueError, match="not a Mode AA"):
-            AreaFile(mode_a_ir_file).read_ir_temperature_mode_aa(8)
+            AreaFile(mode_a_ir_file).read_ir_temperature_aa(8)
 
     def test_band_out_of_range(self, mode_aa_file):
         """The visible channel is not covered by the Mode AA formula."""
         with pytest.raises(ValueError, match="1-12"):
-            AreaFile(mode_aa_file).read_ir_temperature_mode_aa(13)
+            AreaFile(mode_aa_file).read_ir_temperature_aa(13)
 
     def test_short_calibration_region(self, tmp_path, caplog):
         """A file without room for the calibration entries cannot be calibrated."""
@@ -185,7 +185,7 @@ class TestModeAA:
         spec.cal_len = 50
         area = AreaFile(write_area_file(tmp_path / "goes05.1983.229.2231-2.AREA_IR", spec))
         with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="no Mode AA calibration"):
-            area.read_ir_temperature_mode_aa(8)
+            area.read_ir_temperature_aa(8)
         assert "Mode AA calibration region is only 50 bytes" in caplog.text
 
     def test_without_band_list(self, tmp_path, mode_aa_file, caplog):
@@ -196,8 +196,8 @@ class TestModeAA:
         with caplog.at_level(logging.WARNING):
             assert area.band_list is None
         assert "too short for a per-line band list" in caplog.text
-        np.testing.assert_allclose(area.read_ir_temperature_mode_aa(8),
-                                   AreaFile(mode_aa_file).read_ir_temperature_mode_aa(8))
+        np.testing.assert_allclose(area.read_ir_temperature_aa(8),
+                                   AreaFile(mode_aa_file).read_ir_temperature_aa(8))
 
 
 class TestModeAAA:
