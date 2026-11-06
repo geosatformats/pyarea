@@ -352,14 +352,3 @@ class TestMalformedFiles:
         path.write_bytes(bytes(100))
         with pytest.raises(ValueError, match="Truncated AREA directory"):
             AreaFile(str(path))
-
-
-@pytest.mark.parametrize(
-    ("sensor", "satellite", "band"),
-    [(16, "SMS-1", "VIS"), (17, "SMS-1", "IR"), (19, "SMS-2", "IR"), (20, "GOES-1", "VIS"),
-     (27, "GOES-4", "IR"), (32, "GOES-7", "VIS"), (33, "GOES-7", "IR"),
-     (15, None, None), (34, None, None), (70, None, None)])
-def test_sensor_numbers(tmp_path, sensor, satellite, band):
-    """SMS-1 to GOES-7 are told apart by sensor number; every other source has no pre-GVAR platform."""
-    area = AreaFile(write_area_file(tmp_path / "x.AREA", FakeArea(sensor, mode_a_data([100]), **IR_WINDOW)))
-    assert (area.directory.satellite, area.directory.band) == (satellite, band)

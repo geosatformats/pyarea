@@ -5,6 +5,7 @@ import typing
 
 import numpy as np
 import sys
+from pyarea.sensors import SENSORS, get_sensor
 from pyarea.utils import yyyddd_hhmmss2datetime
 
 _, n = os.path.split(os.path.abspath(__file__))
@@ -15,9 +16,8 @@ logger = logging.getLogger(n)
 import struct
 
 
-# sensor numbers 16-33 are SMS-1, SMS-2 and GOES-1..7, each as a visible number followed by an infrared one
-_PREGVAR_FIRST_SENSOR = 16
-_PREGVAR_PLATFORMS = ("SMS-1", "SMS-2") + tuple(f"GOES-{n}" for n in range(1, 8))
+# the sensor names indexed by sensor number ("" where a number is not used)
+_SENSOR_NAMES = tuple(SENSORS[n].name if n in SENSORS else "" for n in range(max(SENSORS) + 1))
 
 # http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#13797
 HEADER_FIELDS = (
@@ -89,161 +89,7 @@ HEADER_FIELDS = (
 class _DirectoryMixin:
     """Behaviour shared by the big- and little-endian directory structures."""
 
-    sensors = (
-    "Derived Data",
-    "Test Patterns",
-    "Graphics",
-    "Miscellaneous",
-    "PDUS Meteosat visible",
-    "PDUS Meteosat infrared",
-    "PDUS Meteosat water vapor",
-    "Radar",
-    "Miscellaneous Aircraft Data",
-    "Raw Meteosat",
-    "Composite image",
-    "Topography image",
-    "GMS visible",
-    "GMS infrared",
-    "ATS 6 visible",
-    "ATS 6 infrared",
-    "SMS-1 visible",
-    "SMS-1 infrared",
-    "SMS-2 visible",
-    "SMS-2 infrared",
-    "GOES-1 visible",
-    "GOES-1 infrared",
-    "GOES-2 visible",
-    "GOES-2 infrared",
-    "GOES-3 visible",
-    "GOES-3 infrared",
-    "GOES-4 visible (VAS)",
-    "GOES-4 infrared and water vapor (VAS)",
-    "GOES-5 visible (VAS)",
-    "GOES-5 infrared and water vapor (VAS)",
-    "GOES-6 visible",
-    "GOES-6 infrared",
-    "GOES-7 visible, Block 1 supplemental data",
-    "GOES-7 infrared",
-    "FY-2B",
-    "FY-2C",
-    "FY-2D",
-    "FY-2E",
-    "FY-2F",
-    "FY-2G",
-    "FY-2H",
-    "TIROS-N (POES)",
-    "NOAA-6", "NOAA-7",
-    "NOAA-8", "NOAA-9",
-    "Venus",
-    "Voyager 1",
-    "Voyager 2",
-    "Galileo",
-    "Hubble space telescope",
-    "MSG-1",
-    "MSG-2",
-    "MSG-3",
-    "Meteosat-3",
-    "Meteosat-4",
-    "Meteosat-5",
-    "Meteosat-6",
-    "Meteosat-7",
-    "",
-    "NOAA-10",
-    "NOAA-11",
-    "NOAA-12",
-    "NOAA-13",
-    "NOAA-14",
-    "NOAA-15",
-    "NOAA-16",
-    "NOAA-17",
-    "NOAA-18",
-    "NOAA-19",
-    "GOES 8 imager",  # 70
-    "GOES 8 sounder",
-    "GOES 9 imager",
-    "GOES 9 sounder",
-    "GOES 10 imager",
-    "GOES 10 sounder",
-    "GOES 11 imager",
-    "GOES 11 sounder",
-    "GOES 12 imager",
-    "GOES 12 sounder",
-    "ERBE",
-    "",
-    "GMS-4",
-    "GMS-5",
-    "GMS-6",
-    "GMS-7",
-    "GMS-8",
-    "DMSP F-8",
-    "DMSP F-9",
-    "DMSP F-10",
-    "DMSP F-11",
-    "DMSP F-12",
-    "DMSP F-13",
-    "DMSP F-14",
-    "DMSP F-15",  # 94
-    "FY-1B",
-    "FY-1C",
-    "FY-1D",
-    "",
-    "",
-    "",
-    "TERRA L1B",  # 101
-    "TERRA CLD",
-    "TERRA GEO",
-    "TERRA-AER",
-    "",
-    "TERRA TOP",
-    "TERRA ATM",
-    "TERRA GUE",
-    "TERRA RET",
-    "",
-    "AQUA L1B",# 111
-    "AQUA CLD",
-    "AQUA GEO",
-    "AQUA AER",
-    "",
-    "AQUA TOP",
-    "AQUA ATM",
-    "AQUA GUE",
-    "AQUA RET",
-    "",  # 120
-    "", "", "", "", "", "", "", "", "", "",  # 130
-    "", "", "", "", "", "", "", "", "", "",  # 140
-    "", "", "", "", "", "", "", "", "", "",  # 150
-    "", "", "", "", "", "", "", "", "",
-    "TERRA NDVI",  # 160
-    "TERRA CREF",
-    "", "", "", "", "", "", "", "",
-    "AQUA NDVI",  # 170
-    "AQUA CREF",
-    "", "", "", "", "", "", "", "",
-    "GOES 13 imager",  # 180
-    "GOES 13 sounder",
-    "GOES 14 imager",
-    "GOES 14 sounder",
-    "GOES 15 imager",
-    "GOES 15 sounder",
-    "GOES 16 imager",
-    "GOES 16 sounder",
-    "",  # 188
-    "", "",  # 190
-    "", "", "", "", "DMSP F-16",  # 195
-    "DMSP F-17",
-    "", "", "",  # 199
-    "AIRS L1B",  # 200
-    "", "", "", "", "", "", "", "", "",
-    "AMSR-E L1B",  # 210
-    "AMSR-E RAIN",
-    "", "", "", "", "", "", "", "", "",  # 220
-    "", "", "", "", "", "", "", "", "",
-    "Kalpana-1",  # 230
-    "", "", "", "", "", "", "", "", "",
-    "MetOp-A",  # 240
-    "MetOp-B",
-    "MetOp-C",
-    "")
+    sensors = _SENSOR_NAMES
 
     def _setup(self, dir_bytes):
         self.dir_bytes = dir_bytes
@@ -394,9 +240,14 @@ class _DirectoryMixin:
         return self.sensors[number] if 0 <= number < len(self.sensors) else ""
 
     @property
+    def sensor_info(self):
+        """The :class:`pyarea.sensors.Sensor` for this file's sensor number, or None if it is not in the table."""
+        return get_sensor(self.sensor_source_number)
+
+    @property
     def sensor(self):
         """Short platform name, e.g. ``GOES-3`` or ``GOES8`` (None if there isn't one)."""
-        if self.satellite is not None:
+        if 16 <= self.sensor_source_number <= 33:  # SMS-1 to GOES-7
             return self.satellite
         text = self.sensor_name
         if ' ' in text:
@@ -407,22 +258,16 @@ class _DirectoryMixin:
             return text
 
     @property
-    def _pregvar_index(self):
-        """0-17 for the SMS-1..GOES-7 sensor numbers (visible, infrared, ...), otherwise None."""
-        index = self.sensor_source_number - _PREGVAR_FIRST_SENSOR
-        return index if 0 <= index < 2 * len(_PREGVAR_PLATFORMS) else None
-
-    @property
     def satellite(self):
-        """Pre-GVAR platform name (``SMS-1``, ``GOES-3``...) or None for any other source."""
-        index = self._pregvar_index
-        return None if index is None else _PREGVAR_PLATFORMS[index // 2]
+        """The platform name from the sensor table (``SMS-1``, ``GOES-3``, ``NOAA-15``...), or None."""
+        info = self.sensor_info
+        return None if info is None else info.platform
 
     @property
     def band(self):
-        """``VIS`` or ``IR`` for pre-GVAR SMS/GOES sensor numbers, otherwise None."""
-        index = self._pregvar_index
-        return None if index is None else ("VIS", "IR")[index % 2]
+        """``VIS`` or ``IR`` for visible and infrared sensors in the sensor table, otherwise None."""
+        info = self.sensor_info
+        return None if info is None else info.band
 
     @property
     def ssp(self):
