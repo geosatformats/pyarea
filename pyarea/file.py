@@ -3,6 +3,9 @@ from io import BytesIO
 from pyarea.directory import DIRECTORY_BYTES, area_directory
 from pyarea.calibration import (
     MODE_AA_DELTA_F,
+    GVARCalibrator,
+    cal_type_from_name,
+    calibrated_unit,
     aaa_radiance,
     aaa_temperature,
     mode_a_ir_temperature,
@@ -415,6 +418,31 @@ class AreaFile(BytesIO):
         if counts.max() > 255:
             raise ValueError(f'{self.source}: raw values exceed 8 bits (max {counts.max()}).')
         return mode_a_ir_temperature(counts)
+
+    @property
+    def gvar_calibrator(self):
+        """A :class:`GVARCalibrator` built from this file's calibration block (GVAR, GOES-8 onward)."""
+        if self.source_type != 'GVAR':
+            raise ValueError(f'{self.source}: source type is {self.source_type!r}, not GVAR.')
+        cal = getattr(self, 'cal', None)
+        return GVARCalibrator(self.directory.sensor_source_number, cal if self.has_calibration else None)
+
+    def read_calibrated(self, units='TEMP', band=None):
+        """Calibrate a single-band GVAR image.
+
+        Args:
+            units: ``'RAW'``, ``'RAD'``, ``'ALB'`` (percent, visible), ``'TEMP'`` (K, IR) or ``'BRIT'``.
+            band: The band number; by default the file's only band.
+
+        Returns:
+            float32 array of shape ``(lines, elements)``; use ``calibrated_unit`` for its unit.
+        """
+        if band is None:
+            if self.num_bands != 1:
+                raise ValueError(f'{self.source}: this file has {self.num_bands} bands; pass band=.')
+            band = self.directory.bands[0]
+        out = cal_type_from_name(units)
+        return self.gvar_calibrator.calibrate_array(self.read_data(), band, out)
 
     def read_vis(self, calibration='counts'):
         """VIS counts, or ``calibration='unnormalized_reflectance'`` for a linear rescale to percent (0-100)."""
