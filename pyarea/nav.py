@@ -12,14 +12,9 @@ from numpy import nan
 
 from pyarea import utils
 
-try:
-    import numba
+import numba
 
-    _njit = numba.njit
-except ImportError:  # slower, but everything still works without numba
-
-    def _njit(func):
-        return func
+_njit = numba.njit
 
 
 ne.set_num_threads(cpu_count())

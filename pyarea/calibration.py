@@ -1,6 +1,7 @@
 __author__ = 'jano'
 import math
 
+import numpy as np
 from numpy import nan
 
 from pyarea import utils
@@ -621,3 +622,146 @@ class G10GVARCalibrator(GVARCalibrator):
             outval = float(temp - (self.sounder10TC1[band - 1] / self.sounder10TC2[band - 1]))
 
         return outval
+
+
+# ---------------------------------------------------------------------------
+# Pre-GVAR (SMS/GOES-1..7 VISSR/VAS) calibration.
+#
+# Mode A (source type VISR): 8-bit counts, brightness temperature from the
+# documented BRIT formula.
+# Mode AA (VAS, GOES-4/5/6, 1980-86): per-line offset/gain entries in the line
+# prefix, Planck-inverted with the McIDAS vastbl constants.
+# Mode AAA (GOES-6/7, 1987-94): per-channel coefficients in the CAL block.
+# Constants courtesy of SSEC via NOAA CLASS.
+
+# channel code (1-38) -> IR band (1-12); index 0 is code 1
+MODE_AA_CHANNEL_BANDS = tuple(range(1, 13)) * 2 + (3, 4, 5, 7, 8, 9, 10) * 2
+# deltaF prefix code (0-15) -> actual deltaF (-5..+5)
+MODE_AA_DELTA_F = (0, -1, -2, -3, -4, -5, 0, 0, 0, 1, 2, 3, 4, 5, 0, 0)
+# band -> (F, FK1, FK2, TC1, TC2)
+MODE_AA_COEFFS = {
+    1: (7, 3723, 976.5, -0.0003905001, 1.0),
+    2: (7, 3910, 992.5, 0.002225, 1.0),
+    3: (7, 4097, 1008, 0.00236, 1.0),
+    4: (7, 4352, 1029, 0.004170999, 0.9999),
+    5: (7, 5049, 1081, 0.004202001, 0.9999),
+    6: (11, 128100, 3176, 0.06761003, 0.9998),
+    7: (7, 5874, 1137, 0.004214, 0.9999),
+    8: (7, 8512, 1286, 0.3212, 0.9974),
+    9: (8, 30940, 1978, 0.06927001, 0.9997),
+    10: (8, 38880, 2134, 0.7513, 0.9973),
+    11: (11, 136000, 3240, 0.05738, 0.9999),
+    12: (13, 195900, 3659, 0.4237, 0.9991),
+}
+
+# Mode AAA channel -> (FK1, FK2, TC1, TC2). Only channels 1-12 are confirmed;
+# channel 13 borrows channel 8's constants.
+VAS_PLANCK_COEFFS_GOES6 = {
+    1: (3716.0, 975.8, -0.0002859, 1.0),
+    2: (3936.0, 994.8, 0.002472, 1.0),
+    3: (4089.0, 1007.0, 0.002334, 1.0),
+    4: (4336.0, 1027.0, 0.003948, 0.9999),
+    5: (5019.0, 1079.0, 0.004031, 0.9999),
+    6: (128000.0, 3175.0, 0.06857, 0.9998),
+    7: (5855.0, 1136.0, 0.004256, 0.9999),
+    8: (8438.0, 1283.0, 0.3263, 0.9973),
+    9: (31030.0, 1980.0, 0.06822, 0.9997),
+    10: (38790.0, 2133.0, 0.736, 0.9973),
+    11: (136100.0, 3241.0, 0.05787, 0.9999),
+    12: (195000.0, 3653.0, 0.4213, 0.9991),
+}
+VAS_PLANCK_COEFFS_GOES7 = {
+    1: (3767.0, 980.3, -0.001267, 1.0),
+    2: (3940.0, 995.1, 0.00318, 0.9999),
+    3: (4167.0, 1014.0, 0.002383, 1.0),
+    4: (4364.0, 1030.0, 0.002739, 0.9999),
+    5: (5025.0, 1079.0, 0.00536, 0.9999),
+    6: (129100.0, 3185.0, 0.07353, 0.9998),
+    7: (5851.0, 1135.0, 0.004447, 0.9999),
+    8: (8525.0, 1287.0, 0.3408, 0.9973),
+    9: (31070.0, 1981.0, 0.06478, 0.9998),
+    10: (39200.0, 2140.0, 0.6448, 0.9977),
+    11: (132500.0, 3212.0, 0.0583, 0.9999),
+    12: (193200.0, 3642.0, 0.415, 0.9991),
+}
+VAS_PLANCK_COEFFS_BY_SATELLITE = {
+    "GOES-6": VAS_PLANCK_COEFFS_GOES6,
+    "GOES-7": VAS_PLANCK_COEFFS_GOES7,
+}
+
+
+def vas_planck_coeffs(satellite, channel):
+    """Return ``(FK1, FK2, TC1, TC2)`` for a Mode AAA channel of ``satellite``."""
+    table = VAS_PLANCK_COEFFS_BY_SATELLITE.get(satellite)
+    if table is None:
+        raise NotImplementedError(
+            f"No verified VAS Planck-inversion constants for satellite {satellite!r} "
+            f"(only GOES-6 and GOES-7 are confirmed)."
+        )
+    planck_channel = 8 if channel == 13 else channel
+    if planck_channel not in table:
+        raise NotImplementedError(
+            f"No verified Planck-inversion constants for channel {channel} on {satellite} "
+            f"(only channels 1-12 have been checked against real data)."
+        )
+    return table[planck_channel]
+
+
+def mode_a_ir_temperature(counts):
+    """Mode A (VISR) IR counts to brightness temperature in K: ``418 - B`` for B >= 176, else ``330 - B/2``."""
+    counts = np.asarray(counts, dtype=np.float32)
+    return np.where(counts >= 176, 418.0 - counts, 330.0 - counts / 2.0)
+
+
+def vis_unnormalized_reflectance(counts):
+    """VIS counts to percent: a linear rescale of the 6-bit encoding (max count 252), clipped to 0-100.
+
+    This is relative, not an absolute reflectance: no calibration to albedo exists for these satellites.
+    """
+    return np.clip(np.asarray(counts, dtype=np.float32) / 252.0 * 100.0, 0.0, 100.0)
+
+
+def mode_aa_code_to_band(codes):
+    """Map Mode AA channel codes (1-38) to IR bands (1-12); anything else (e.g. unused 0) maps to 0."""
+    codes = np.asarray(codes)
+    lookup = np.array((0,) + MODE_AA_CHANNEL_BANDS)
+    out = np.zeros_like(codes)
+    valid = (codes >= 1) & (codes <= 38)
+    out[valid] = lookup[codes[valid]]
+    return out
+
+
+def mode_aa_temperature(raw, delta_f, ysubz, band):
+    """Mode AA brightness temperature (K) for IR ``band`` from raw counts and per-line offset/gain.
+
+    Args:
+        raw: Raw counts, shape (lines, elements).
+        delta_f: Per-line deltaF, shape (lines,).
+        ysubz: Per-line zero offset, shape (lines,).
+        band: IR band 1-12.
+
+    Returns:
+        float32 array, NaN where the raw count is 0 or the corrected count rounds down to 0.
+    """
+    f, fk1, fk2, tc1, tc2 = MODE_AA_COEFFS[band]
+    corrected = np.maximum(0.0, raw - ysubz[:, None])
+    corrected = 8.0 * np.floor(corrected / 8.0)
+    radiance = corrected * (2.0 ** (delta_f[:, None] - f))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        t = (fk2 / np.log(fk1 / radiance + 1.0) - tc1) / tc2
+    return np.where((raw == 0) | (corrected == 0), np.nan, t).astype(np.float32)
+
+
+def aaa_radiance(counts, ab1, ab2, ifab):
+    """Mode AAA counts to radiance using the CAL block's AB1, AB2 and IFAB for the channel."""
+    return ((ab2 * np.asarray(counts, dtype=np.float64) / 32.0 - ab1) / 2.0 ** (15 - ifab)).astype(np.float32)
+
+
+def aaa_temperature(radiance, coeffs):
+    """Planck-invert Mode AAA radiance with ``(FK1, FK2, TC1, TC2)``; NaN where the inversion is undefined."""
+    fk1, fk2, tc1, tc2 = coeffs
+    r = np.asarray(radiance, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        expn = fk1 / r + 1.0
+        t = fk2 / np.log(expn)
+    return np.where((r > -fk1) & (expn > 0), (t - tc1) / tc2, np.nan).astype(np.float32)

@@ -10,14 +10,13 @@ readme = "README"
 license = { text = "LGPL-3.0-or-later" }
 authors = [{ name = "Ioan Ferencik" }]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "numexpr", "pyproj"]
+dependencies = ["numpy>=1.24", "numba", "numexpr", "pyproj"]
 
 [project.optional-dependencies]
-pregvar = ["numba"]
-test = ["pytest", "pytest-cov", "numba"]
+test = ["pytest", "pytest-cov"]
 
 [tool.setuptools]
-packages = ["pyarea", "pyarea.navigation", "pyarea.pregvar"]
+packages = ["pyarea", "pyarea.navigation"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

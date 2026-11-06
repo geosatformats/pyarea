@@ -2,6 +2,8 @@ import ctypes as C
 import logging
 import os
 import typing
+
+import numpy as np
 import sys
 from pyarea.utils import yyyddd_hhmmss2datetime
 
@@ -10,8 +12,11 @@ logger = logging.getLogger(n)
 
 
 
+import re
 import struct
 
+
+_PREGVAR_SENSOR = re.compile(r'^((?:SMS|GOES)-\d+) (visible|infrared)')
 
 # http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#13797
 HEADER_FIELDS = (
@@ -80,9 +85,8 @@ HEADER_FIELDS = (
 )
 
 
-class area_directory(C.BigEndianStructure):
-    _pack_ = 1
-    _fields_ = HEADER_FIELDS
+class _DirectoryMixin:
+    """Behaviour shared by the big- and little-endian directory structures."""
 
     sensors = (
     "Derived Data",
@@ -240,7 +244,7 @@ class area_directory(C.BigEndianStructure):
     "MetOp-C",
     "")
 
-    def __init__(self, dir_bytes=None):
+    def _setup(self, dir_bytes):
         self.dir_bytes = dir_bytes
         self.nominal_time = yyyddd_hhmmss2datetime(self.yyyddd, self.hhmmss)
         self.creation_time = yyyddd_hhmmss2datetime(self.file_yyyddd, self.file_hhmmss)
@@ -266,51 +270,6 @@ class area_directory(C.BigEndianStructure):
         self.bands = self.bands_1_32 + self.bands_33_64
 
         self.comment_cards = list() if self.comment_count > 0 else None
-
-
-    def __new__(cls, dir_bytes=None):
-
-        endianness_test_value = struct.unpack('>i', dir_bytes[4:8])[0]
-        if endianness_test_value == 4:
-            sup_cls = C.BigEndianStructure
-            cls.byte_order = '>'
-        else:
-            sup_cls = C.LittleEndianStructure
-            cls.byte_order = '<'
-        cls.__bases__ = tuple([sup_cls])
-
-        #cls = type(cls.__name__, (sup_cls, area_directory),{'_pack_': cls._pack_, '_fields_': cls._fields_})
-
-        inst = cls.from_buffer_copy(dir_bytes)
-
-        return inst
-
-
-    # def __new__(cls, dir_bytes=None):
-    #
-    #     file_is_big_endian = struct.unpack('>i', dir_bytes[4:8])[0] == 4
-    #     sys_byte_order = sys.byteorder
-    #     if sys_byte_order == 'little':
-    #         if file_is_big_endian:
-    #             sup_cls = C.BigEndianStructure
-    #             cls.byte_order = '>'
-    #             cls = type(cls.__name__, (sup_cls, area_directory), {'_pack_': cls._pack_, '_fields_': cls._fields_})
-    #             inst = cls.from_buffer_copy(dir_bytes)
-    #         else:
-    #             cls.byte_order = '<'
-    #             inst = area_directory.from_buffer_copy(dir_bytes)
-    #     else:
-    #         if file_is_big_endian:
-    #             cls.byte_order = '>'
-    #             inst = area_directory.from_buffer_copy(dir_bytes)
-    #         else:
-    #             sup_cls = C.LittleEndianStructure
-    #             cls.byte_order = '<'
-    #             cls = type(cls.__name__, (sup_cls, area_directory), {'_pack_': cls._pack_, '_fields_': cls._fields_})
-    #             inst = cls.from_buffer_copy(dir_bytes)
-    #
-    #     return inst
-
 
 
     def __eq__(self, other):
@@ -428,17 +387,38 @@ class area_directory(C.BigEndianStructure):
         return start_line, end_line, start_elem, end_elem
 
     @property
+    def sensor_name(self):
+        """The full name for the sensor/source number, e.g. ``GOES-3 infrared`` (empty if unknown)."""
+        number = self.sensor_source_number
+        return self.sensors[number] if 0 <= number < len(self.sensors) else ""
+
+    @property
     def sensor(self):
-        space = ' '
-        text = self.sensors[self.sensor_source_number]
-        if space in text:
-            stext = text.split(space)
+        """Short platform name, e.g. ``GOES-3`` or ``GOES8`` (None if there isn't one)."""
+        text = self.sensor_name
+        match = _PREGVAR_SENSOR.match(text)
+        if match:
+            return match.group(1)
+        if ' ' in text:
+            stext = text.split(' ')
             if 'GOES' in stext:
                 return ''.join(stext[:2])
         else:
             return text
 
+    @property
+    def satellite(self):
+        """Pre-GVAR platform name (``SMS-1``, ``GOES-3``...) or None for any other source."""
+        match = _PREGVAR_SENSOR.match(self.sensor_name)
+        return match.group(1) if match else None
 
+    @property
+    def band(self):
+        """``VIS`` or ``IR`` for pre-GVAR SMS/GOES sensor numbers, otherwise None."""
+        match = _PREGVAR_SENSOR.match(self.sensor_name)
+        if not match:
+            return None
+        return "VIS" if match.group(2) == "visible" else "IR"
 
     @property
     def ssp(self):
@@ -461,6 +441,62 @@ class area_directory(C.BigEndianStructure):
             return unit_options[self.units]
 
 
+class _AreaDirectoryBE(_DirectoryMixin, C.BigEndianStructure):
+    _pack_ = 1
+    _fields_ = HEADER_FIELDS
 
 
+class _AreaDirectoryLE(_DirectoryMixin, C.LittleEndianStructure):
+    _pack_ = 1
+    _fields_ = HEADER_FIELDS
 
+
+_DIRECTORY_CLASSES = {'>': _AreaDirectoryBE, '<': _AreaDirectoryLE}
+DIRECTORY_BYTES = 256
+
+
+def _directory_plausibility(words):
+    """Score how plausible a directory is when its 64 words are read in one byte order."""
+    names = _DirectoryMixin.sensors
+    sensor, lines, elements = int(words[2]), int(words[8]), int(words[9])
+    score = 10 if 0 <= sensor < len(names) and names[sensor] else 0
+    score += 5 * (int(words[1]) == 4)  # the AREA version number
+    return score + int(0 < lines < 200000) + int(0 < elements < 200000)
+
+
+def detect_byte_order(dir_bytes):
+    """Return ``'>'`` or ``'<'``, whichever reads the directory as the more plausible one.
+
+    The AREA spec says files are big-endian, but plenty of real ones were
+    written little-endian, so both are tried and scored on the sensor number,
+    the version word and the image size. Ties go to big-endian.
+    """
+    scores = {order: _directory_plausibility(np.frombuffer(dir_bytes[:DIRECTORY_BYTES], dtype=f'{order}i4'))
+              for order in ('>', '<')}
+    best = max(scores, key=lambda order: (scores[order], order == '>'))
+    if scores[best] < 10:
+        logger.warning('Could not confidently detect the AREA byte order (scores %s); assuming big-endian.', scores)
+        return '>'
+    return best
+
+
+def area_directory(dir_bytes, byte_order=None):
+    """Parse the 256-byte AREA directory.
+
+    Args:
+        dir_bytes: The first 256 bytes of the file.
+        byte_order: ``'>'`` or ``'<'``; detected from the content when omitted.
+
+    Returns:
+        A ctypes structure with the directory words as attributes and the
+        byte order it was read with in ``.byte_order``.
+    """
+    if len(dir_bytes) < DIRECTORY_BYTES:
+        raise ValueError(f'Truncated AREA directory: {len(dir_bytes)} bytes, expected {DIRECTORY_BYTES}')
+    dir_bytes = bytes(dir_bytes[:DIRECTORY_BYTES])
+    if byte_order is None:
+        byte_order = detect_byte_order(dir_bytes)
+    directory = _DIRECTORY_CLASSES[byte_order].from_buffer_copy(dir_bytes)
+    directory.byte_order = byte_order
+    directory._setup(dir_bytes)
+    return directory

@@ -1,5 +1,16 @@
+from functools import cached_property
 from io import BytesIO
-from pyarea.directory import area_directory
+from pyarea.directory import DIRECTORY_BYTES, area_directory
+from pyarea.calibration import (
+    MODE_AA_DELTA_F,
+    aaa_radiance,
+    aaa_temperature,
+    mode_a_ir_temperature,
+    mode_aa_code_to_band,
+    mode_aa_temperature,
+    vas_planck_coeffs,
+    vis_unnormalized_reflectance,
+)
 from pyarea.nav import AreaNav
 from pyarea.utils import INT32SIZE
 import struct
@@ -9,7 +20,17 @@ import logging
 _, name = os.path.split(__file__)
 logger = logging.getLogger(name)
 
+_AAA_PRE_BANDLIST_LEN = 4 + 512 + 116  # validity code, common documentation, VAS calibration info
+_AAA_CAL_MIN_WORDS = 117
+
 class AreaFile(BytesIO):
+    """A McIDAS AREA file: directory, navigation, calibration and image data.
+
+    Besides the generic AREA parts this reads the pre-GVAR SMS/GOES-1..7
+    VISSR/VAS products (Mode A, AA and AAA), including their per-line band
+    lists and calibration; see the ``read_*`` methods.
+    """
+
     INTEGER_FORMAT = 'i'
 
     def __init__(self, source=None, lazy=True):
@@ -26,128 +47,119 @@ class AreaFile(BytesIO):
             self.source = None
             super().__init__(source)
 
-        self.sz  = len(self.getbuffer())
+        self.sz = len(self.getbuffer())
 
-        self.directory = area_directory(self.read(256))
+        self.directory = area_directory(self.getbuffer()[:DIRECTORY_BYTES])
         self.adir_bytes = self.directory.dir_bytes
 
-
-        #as per http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#34971
-        #after the directory bytes the block are, in order
-        #nav, cal, aux, data, comments
-
-        self.navigation_offset = self.calibration_offset = self.aux_offset = None
+        # as per http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#34971
+        # after the directory bytes the blocks are, in order: nav, cal, aux, data, comments
         self.navigation_offset = self.directory.nav_block_offset
         self.calibration_offset = self.directory.cal_block_offset
         self.aux_offset = self.directory.aux_block_offset
         self.data_offset = self.directory.data_block_offset
 
+        # the directory's own prefix length is what the data is laid out with; the documented parts
+        # (validity code, documentation, calibration, band list) do not always add up to it in real files
+        self.line_prefix_len = self.directory.line_prefix_length
+        parts = (self.directory.prefix_doc_length + self.directory.prefix_cal_length
+                 + self.directory.prefix_band_length + (4 if self.directory.validity_code != 0 else 0))
+        if parts != self.line_prefix_len:
+            logger.debug('Line prefix length %d does not match its parts (%d) in %s.',
+                         self.line_prefix_len, parts, self.source)
 
-
-
-        self.line_prefix_len = self.directory.prefix_doc_length + self.directory.prefix_cal_length + self.directory.prefix_band_length
-        if self.directory.validity_code != 0:
-            self.line_prefix_len +=4
-        # print(self.line_prefix_len != self.directory.line_prefix_length)
-        if self.line_prefix_len != self.directory.line_prefix_length:
-            raise Exception('Invalid line prefix length in AREA file.')
-
-
-        #start from the back of the file
-        if self.data_offset>0:
-            self.nav_size = self.data_offset - self.navigation_offset
-            self.cal_size = self.data_offset - self.calibration_offset
-            self.aux_size = self.data_offset - self.aux_offset
-
-
-        if self.aux_offset>0 and self.directory.aux_block_length>0:
-            self.nav_size = self.aux_offset - self.nav_size
-            self.cal_size = self.aux_offset - self.calibration_offset
-
-
-        if self.calibration_offset>0:
-            self.nav_size = self.calibration_offset - self.navigation_offset
-
-
-        #read
         self.nav_bytes = self.cal_bytes = self.aux_bytes = None
+        self.nav = self.cal = self.aux = None
         self.has_navigation = self.has_calibration = self.has_auxiliary = False
-        if self.navigation_offset>0 and self.nav_size > 0:
-            self.nav_bytes = self.read(self.nav_size)
-            self.nav = struct.unpack(f'{self.directory.byte_order}{self.nav_size//INT32SIZE}{self.INTEGER_FORMAT}', self.nav_bytes)
-            self.has_navigation = True
-        if self.calibration_offset>0 and self.cal_size>0:
-            self.cal_bytes = self.read(self.cal_size)
-            self.has_calibration = True
-            self.cal = struct.unpack(f'{self.directory.byte_order}{self.cal_size//INT32SIZE}{self.INTEGER_FORMAT}', self.cal_bytes)
-        if self.aux_offset> 0 and self.aux_size>0:
-            self.aux_bytes = self.read(self.aux_size)
-            self.has_auxiliary = True
-            self.aux = struct.unpack(f'{self.directory.byte_order}{self.aux_size//INT32SIZE}{self.INTEGER_FORMAT}', self.aux_bytes)
+        self.nav_size = self.cal_size = self.aux_size = 0
+        self._read_blocks()
 
-
-
-        logger.debug(f'Has navigation: {self.has_navigation},  has calibration: {self.has_calibration}, Has auxiliary: {self.has_auxiliary}')
+        logger.debug(f'Has navigation: {self.has_navigation},  has calibration: {self.has_calibration}, '
+                     f'Has auxiliary: {self.has_auxiliary}')
         self.areaNav = None
 
-        #setup some info that will be accessed while reading data etc
-
+        # setup some info that will be accessed while reading data etc
         self.datawidth = self.directory.bytes_per_element
         self.num_bands = self.directory.spectral_band_count
-        self.lines = self.directory.lines
         self.elements = self.directory.elements
+        self.claimed_lines = self.directory.lines
 
         self.line_data_len = self.num_bands * self.elements * self.datawidth
         self.line_len = self.line_prefix_len + self.line_data_len
-        self.data_block_len =self.lines * self.line_len
+        self.lines = self._actual_lines()
+        self.data_block_len = self.lines * self.line_len
 
-        self.prefix_len = self.line_prefix_len//self.datawidth
-        self.data_len = self.data_block_len//self.datawidth
-
-
+        self.prefix_len = self.line_prefix_len // self.datawidth
+        self.data_len = self.data_block_len // self.datawidth
 
         if lazy:
             self.data = None
         else:
-
-            # read the data
             self.data = self.__readdata__()
 
+    def _block_end(self, offset):
+        """End of the block starting at ``offset``: the next block's start, or the end of the file."""
+        starts = [o for o in (self.navigation_offset, self.calibration_offset, self.aux_offset, self.data_offset)
+                  if o > offset]
+        return min(starts) if starts else self.sz
 
+    def _read_blocks(self):
+        """Read the nav, cal and aux blocks as 32-bit words, each from its own offset."""
+        fmt = self.directory.byte_order
+        for name, offset in (('nav', self.navigation_offset), ('cal', self.calibration_offset),
+                             ('aux', self.aux_offset)):
+            if offset <= 0 or offset >= self.sz:
+                continue
+            size = self._block_end(offset) - offset
+            size -= size % INT32SIZE
+            if size <= 0:
+                continue
+            raw = bytes(self.getbuffer()[offset:offset + size])
+            words = struct.unpack(f'{fmt}{size // INT32SIZE}{self.INTEGER_FORMAT}', raw)
+            setattr(self, f'{name}_size', size)
+            setattr(self, f'{name}_bytes', raw)
+            setattr(self, name, words)
+            setattr(self, f'has_{"navigation" if name == "nav" else "calibration" if name == "cal" else "auxiliary"}',
+                    True)
 
-    def __datamask__(self):
+    def _actual_lines(self):
+        """The number of lines really present in the data block.
+
+        Truncated files are real, so this can be less than the directory's
+        line count; everything that sizes an array uses this number.
         """
-        Although an pyarea file can have multiple bands they have to have the same resolution, therefore have same number of lines and
-        columns. Becaus eof this the mask, is actually the same for all bands.
-        As a result the resulted mask is 2D not 3D
-        :return:
-        """
+        if self.data_offset <= 0 or self.line_len <= 0:
+            return self.claimed_lines
+        actual = max(0, min(self.claimed_lines, (self.sz - self.data_offset) // self.line_len))
+        if actual != self.claimed_lines:
+            logger.warning('%s: directory claims %d lines but the data block only has %d.',
+                           self.source, self.claimed_lines, actual)
+        return actual
 
-        mask = np.ones(( self.lines, self.num_bands*self.elements + self.prefix_len), dtype=bool)
-        #all at once, no loops
-        mask[ :,:self.prefix_len] = False
-        # pylab.imshow(mask)
-        # pylab.show()
-        return mask
+    @property
+    def actual_lines(self):
+        """Alias of :attr:`lines`: the number of lines present in the file."""
+        return self.lines
+
+    def _line_array(self):
+        """The data block as a ``(lines, bytes per line)`` uint8 array, line prefixes included."""
+        raw = self.getbuffer()[self.data_offset:self.data_offset + self.lines * self.line_len]
+        return np.frombuffer(raw, dtype=np.uint8).reshape(self.lines, self.line_len)
+
+    def _pixel_array(self):
+        """The pixels as a native-endian ``(lines, elements, bands)`` array (BIP, as in the file)."""
+        if self.datawidth not in (1, 2):
+            raise NotImplementedError(f'{self.source}: {self.datawidth} bytes per element is not supported.')
+        pixel_bytes = self._line_array()[:, self.line_prefix_len:self.line_prefix_len + self.line_data_len]
+        if self.datawidth == 1:
+            return pixel_bytes.reshape(self.lines, self.elements, self.num_bands)
+        file_dtype = np.dtype(f'{self.directory.byte_order}u2')
+        pixels = pixel_bytes.copy().view(file_dtype).reshape(self.lines, self.elements, self.num_bands)
+        return pixels.astype(file_dtype.newbyteorder('='), copy=False)
 
     def __readdata__(self):
-
-        mask = self.__datamask__()
-        dtp = f'{self.directory.byte_order}u{self.datawidth}'
-        darray = np.zeros(shape=(self.num_bands, self.lines, self.elements), dtype=dtp)
-        self.seek(0) #because np.buffer has an offset arg
-        self.data_block = np.frombuffer(self.read(), dtype=dtp, count=self.data_len, offset=self.data_offset)
-
-
-        temp_data_block = self.data_block.reshape(self.lines, (self.num_bands*self.elements)+self.prefix_len)
-        temp_masked_data_block = temp_data_block[mask].reshape(self.lines, (self.num_bands*self.elements))
-
-        for bi in range(self.num_bands):
-            darray[bi,:] = temp_masked_data_block[:,bi::self.num_bands]
-
-        return darray
-
-
+        """Read the image as a ``(bands, lines, elements)`` array."""
+        return np.ascontiguousarray(self._pixel_array().transpose(2, 0, 1))
 
     def __getattribute__(self, name):
         if name == 'data':
@@ -216,15 +228,232 @@ class AreaFile(BytesIO):
 
     @property
     def navigation(self):
-        if self.areaNav is None:
-            self.areaNav = AreaNav(navblock=self.nav, byte_order=self.directory.byte_order, int_format=self.INTEGER_FORMAT)
-            self.areaNav.setImageStart(self.directory.line_ul, self.directory.element_ul)
-            self.areaNav.setRes(*self.resolution)
-            self.areaNav.setMag(1,1)
-            self.areaNav.setStart(0,0)
-
-
+        """The navigation object for this file's nav block, or None if it has none or is of an unsupported type."""
+        if self.areaNav is None and self.nav is not None:
+            nav = AreaNav(navblock=self.nav, byte_order=self.directory.byte_order, int_format=self.INTEGER_FORMAT)
+            if nav is not None:
+                nav.setImageStart(self.directory.line_ul, self.directory.element_ul)
+                nav.setRes(*self.resolution)
+                nav.setMag(1, 1)
+                nav.setStart(0, 0)
+                self.areaNav = nav
         return self.areaNav
+
+    # ------------------------------------------------------------------
+    # Pre-GVAR (SMS/GOES-1..7 VISSR/VAS) products
+
+    @property
+    def source_type(self):
+        """The 4-character source type from the directory (``VISR``, ``VAS``, ``AAA``, ``GVAR``...)."""
+        return self.directory.source_type.decode('ascii', errors='replace').strip('\x00').strip()
+
+    @property
+    def cal_type(self):
+        """The 4-character calibration type from the directory (``RAW``, ``BRIT``...)."""
+        return self.directory.cal_type.decode('ascii', errors='replace').strip('\x00').strip()
+
+    @cached_property
+    def aaa_cal(self):
+        """The Mode AAA calibration block as ``{"sensor_source", "iab": {channel: (AB1, AB2)}, "ifab": {channel: IFAB}}``.
+
+        None for any other kind of file, or if the block is too short to be one.
+        """
+        if self.source_type not in ('AAA', 'VAS') or self.cal is None or len(self.cal) < _AAA_CAL_MIN_WORDS:
+            return None
+        words = self.cal
+        return {
+            'sensor_source': int(words[0]),
+            'iab': {chan: (int(words[3 + (chan - 1) * 2]), int(words[4 + (chan - 1) * 2])) for chan in range(1, 39)},
+            'ifab': {chan: int(words[79 + (chan - 1)]) for chan in range(1, 39)},
+        }
+
+    @cached_property
+    def band_list(self):
+        """The channel (1-38) in each band slot of each line, shape ``(lines, bands)``; 0 for an unused slot.
+
+        Read from the line prefix. The order and presence of channels can
+        change from line to line, so every line is resolved on its own.
+        None for files without such a prefix.
+        """
+        if self.source_type not in ('AAA', 'VAS'):
+            return None
+        band_list_len = self.line_prefix_len - _AAA_PRE_BANDLIST_LEN
+        if band_list_len < max(self.num_bands, 1):
+            logger.warning('%s: line prefix of %d bytes is too short for a per-line band list.',
+                           self.source, self.line_prefix_len)
+            return None
+        lines = self._line_array()
+        # only the first num_bands bytes are data, the rest is padding to a word
+        return lines[:, _AAA_PRE_BANDLIST_LEN:_AAA_PRE_BANDLIST_LEN + self.num_bands].copy()
+
+    @cached_property
+    def mode_aa_cal(self):
+        """The per-line Mode AA calibration entries, or None.
+
+        A dict of ``(lines, 13)`` arrays: ``channel``, ``spin``, ``deltaf_code`` and ``ysubz``.
+        """
+        if self.source_type != 'VAS':
+            return None
+        d = self.directory
+        n_entries, entry_bytes, header_bytes = 13, 8, 12
+        if d.prefix_cal_length < header_bytes + n_entries * entry_bytes:
+            logger.warning('%s: Mode AA calibration region is only %d bytes; calibration is unavailable.',
+                           self.source, d.prefix_cal_length)
+            return None
+        start = (4 if d.validity_code != 0 else 0) + d.prefix_doc_length + header_bytes
+        raw = self._line_array()[:, start:start + n_entries * entry_bytes]
+        entries = raw.copy().view(f'{d.byte_order}i2').reshape(self.lines, n_entries, 4)
+        return {
+            'channel': entries[:, :, 0],
+            'spin': entries[:, :, 1],
+            'deltaf_code': entries[:, :, 2],
+            'ysubz': entries[:, :, 3],
+        }
+
+    @cached_property
+    def line_channel_spin(self):
+        """The 13 channel/spin-count groups of each line's prefix: ``{"channel", "num_spins"}``, ``(lines, 13)``.
+
+        A second copy of the channel numbers, useful to cross-check :attr:`band_list`. None without a band list.
+        """
+        if self.band_list is None:
+            return None
+        start = 4 + 512 + 12  # validity code, common documentation, day/time/scan header
+        raw = self._line_array()[:, start:start + 104]
+        groups = raw.copy().view(f'{self.directory.byte_order}u2').reshape(self.lines, 13, 4)
+        return {'channel': groups[:, :, 0], 'num_spins': groups[:, :, 1]}
+
+    def read_data(self):
+        """The image of a single-band file as a ``(lines, elements)`` array."""
+        if self.num_bands != 1:
+            raise ValueError(f'{self.source}: read_data() is for single-band files, this one has {self.num_bands}; '
+                             f'use read_channel() (Mode AAA) or read_ir_temperature_mode_aa() (Mode AA).')
+        return self.data[0]
+
+    def _gather_slot(self, slots, present):
+        """Pick one band slot per line out of the pixel array; absent lines get 0."""
+        pixels = self._pixel_array()
+        out = np.take_along_axis(pixels, np.broadcast_to(slots[:, None, None], pixels.shape[:2] + (1,)),
+                                 axis=2)[:, :, 0].copy()
+        out[~present] = 0
+        return out
+
+    def read_channel(self, channel):
+        """Raw counts of one VAS channel (1-38) of a Mode AAA file.
+
+        Returns:
+            ``(counts, present)``: counts of shape ``(lines, elements)``, and a boolean per line that is False where
+            the channel is not in that line's band list (its counts are 0 and must not be used).
+        """
+        if self.band_list is None:
+            raise ValueError(f'{self.source}: there is no per-line band list.')
+        match = self.band_list == channel
+        present = match.any(axis=1)
+        return self._gather_slot(np.where(present, match.argmax(axis=1), 0), present), present
+
+    def read_ir_radiance(self, channel):
+        """Mode AAA radiance of a VAS channel as float32, NaN on lines without the channel."""
+        if self.aaa_cal is None:
+            raise ValueError(f'{self.source}: there is no Mode AAA calibration block (source type {self.source_type!r}).')
+        lookup = 8 if channel == 13 else channel
+        cal = self.aaa_cal
+        if lookup not in cal['iab'] or lookup not in cal['ifab']:
+            raise ValueError(f'{self.source}: channel {lookup} is not in the calibration block.')
+        ab1, ab2 = cal['iab'][lookup]
+        counts, present = self.read_channel(channel)
+        return np.where(present[:, None], aaa_radiance(counts, ab1, ab2, cal['ifab'][lookup]), np.nan).astype(np.float32)
+
+    def read_ir_temperature_aaa(self, channel):
+        """Mode AAA brightness temperature (K) of a VAS channel as float32."""
+        coeffs = vas_planck_coeffs(self.directory.satellite, channel)
+        return aaa_temperature(self.read_ir_radiance(8 if channel == 13 else channel), coeffs)
+
+    def _mode_aa_line_calibration(self, band):
+        """Per-line ``(cal_present, delta_f, ysubz)`` for an IR band of a Mode AA file."""
+        cal = self.mode_aa_cal
+        match = mode_aa_code_to_band(cal['channel']) == band
+        cal_present = match.any(axis=1)
+        slot = np.where(cal_present, match.argmax(axis=1), 0)
+        rows = np.arange(match.shape[0])
+        deltaf_code = cal['deltaf_code'][rows, slot]
+        table = np.array(MODE_AA_DELTA_F)
+        valid = (deltaf_code >= 0) & (deltaf_code < len(table))
+        delta_f = np.where(valid, table[np.clip(deltaf_code, 0, len(table) - 1)], 0)
+        return cal_present, delta_f, cal['ysubz'][rows, slot].astype(np.float64)
+
+    def _mode_aa_raw_counts(self, band):
+        """``(raw, present)``: the raw counts of an IR band of a Mode AA file and the lines that carry it."""
+        if self.band_list is None:
+            raw = self.read_data().astype(np.float64)
+            return raw, np.ones(raw.shape[0], dtype=bool)
+        match = mode_aa_code_to_band(self.band_list) == band
+        present = match.any(axis=1)
+        return self._gather_slot(np.where(present, match.argmax(axis=1), 0), present).astype(np.float64), present
+
+    def read_ir_temperature_mode_aa(self, band):
+        """Mode AA brightness temperature (K) of IR band 1-12 as float32, NaN where it is missing."""
+        if self.source_type != 'VAS':
+            raise ValueError(f"{self.source}: not a Mode AA ('VAS') file.")
+        if not 1 <= band <= 12:
+            raise ValueError(f'Mode AA IR band must be 1-12 (got {band}); band 13 is visible.')
+        if self.mode_aa_cal is None:
+            raise ValueError(f'{self.source}: there is no Mode AA calibration data.')
+        cal_present, delta_f, ysubz = self._mode_aa_line_calibration(band)
+        raw, raw_present = self._mode_aa_raw_counts(band)
+        valid_line = cal_present & raw_present
+        t = mode_aa_temperature(raw, delta_f, ysubz, band)
+        return np.where(valid_line[:, None], t, np.nan).astype(np.float32)
+
+    def read_ir_temperature(self):
+        """Mode A (single band) IR brightness temperature (K) as float32."""
+        if self.directory.band != 'IR':
+            raise ValueError(f'{self.source}: band is {self.directory.band!r}, not IR.')
+        if self.source_type in ('AAA', 'VAS'):
+            raise NotImplementedError(f'{self.source}: this is a multiband {self.source_type!r} file; use '
+                                      f'read_ir_temperature_aaa() or read_ir_temperature_mode_aa().')
+        counts = self.read_data()
+        if counts.max() > 255:
+            raise ValueError(f'{self.source}: raw values exceed 8 bits (max {counts.max()}).')
+        return mode_a_ir_temperature(counts)
+
+    def read_vis(self, calibration='counts'):
+        """VIS counts, or ``calibration='unnormalized_reflectance'`` for a linear rescale to percent (0-100)."""
+        if self.directory.band != 'VIS':
+            raise ValueError(f'{self.source}: band is {self.directory.band!r}, not VIS.')
+        counts = self.read_data().astype(np.float32)
+        if calibration == 'counts':
+            return counts
+        if calibration == 'unnormalized_reflectance':
+            return vis_unnormalized_reflectance(counts)
+        raise ValueError(f'Unsupported VIS calibration {calibration!r}.')
+
+    def get_nadir_sampling(self):
+        """The sub-satellite point, altitude and nadir line/element spacing (see ``GOESNav.get_nadir_sampling``)."""
+        return self._goes_nav().get_nadir_sampling()
+
+    def _goes_nav(self):
+        nav = self.navigation
+        if nav is None or not hasattr(nav, 'get_nadir_sampling'):
+            raise ValueError(f'{self.source}: there is no GOES navigation block.')
+        return nav
+
+    def get_lonlats(self, lines=None, elems=None):
+        """Earth-locate pixels with the pre-GVAR GOES navigation.
+
+        Args:
+            lines: 0-based line indices in this file; all present lines by default.
+            elems: 0-based element indices; all by default.
+
+        Returns:
+            ``(lon, lat)`` in degrees, shape ``(len(lines), len(elems))``, NaN off the earth.
+        """
+        nav = self._goes_nav()
+        lines = np.arange(self.lines) if lines is None else lines
+        elems = np.arange(self.elements) if elems is None else elems
+        line_grid, elem_grid = np.meshgrid(lines, elems, indexing='ij')
+        # file coordinates are 1-based in McIDAS; the navigation adds the ul line/element and resolution itself
+        lat, lon = nav.to_latlon(line_grid + 1, elem_grid + 1)
+        return lon, lat
 
     def __str__(self):
         if self.source:
