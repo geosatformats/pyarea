@@ -596,6 +596,7 @@ class AreaFile(BytesIO):
                 '31 Visible detector 8 data not valid'
             """
             _pack_ = 1
+            _layout_ = "ms"  # what Python used implicitly; spelled out since 3.14 deprecates the default
 
             _fields_ = (('frame_start', C.c_uint8, 1),  # 0
                         ('frame_end', C.c_uint8, 1),  # 1

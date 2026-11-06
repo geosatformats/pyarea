@@ -443,11 +443,13 @@ class _DirectoryMixin:
 
 class _AreaDirectoryBE(_DirectoryMixin, C.BigEndianStructure):
     _pack_ = 1
+    _layout_ = "ms"  # what Python used implicitly; spelled out since 3.14 deprecates the default
     _fields_ = HEADER_FIELDS
 
 
 class _AreaDirectoryLE(_DirectoryMixin, C.LittleEndianStructure):
     _pack_ = 1
+    _layout_ = "ms"  # what Python used implicitly; spelled out since 3.14 deprecates the default
     _fields_ = HEADER_FIELDS
 
 
