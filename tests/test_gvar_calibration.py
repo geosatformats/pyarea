@@ -63,7 +63,9 @@ def test_visible_albedo_and_brit():
     alb = cal.calibrate_array(counts, 1, Calibrator.CAL_ALB)
     np.testing.assert_allclose(alb, expected * 100, rtol=1e-4, atol=1e-6)
     brit = cal.calibrate_array(counts, 1, Calibrator.CAL_BRIT)
-    np.testing.assert_array_equal(brit, np.floor(np.sqrt(100 * expected) * 25.5 + 0.5))
+    np.testing.assert_array_equal(brit, np.minimum(np.floor(np.sqrt(100 * expected) * 25.5 + 0.5), 255))
+    huge = cal.calibrate_array(np.array([60000.0]), 1, Calibrator.CAL_BRIT)
+    assert huge[0] == 255
     with pytest.raises(ValueError):
         cal.calibrate_array(counts, 1, Calibrator.CAL_TEMP)
 

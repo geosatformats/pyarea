@@ -315,7 +315,7 @@ class GVARCalibrator(Calibrator):
             albedo = self._albedo(counts)
             if calTypeOut == self.CAL_ALB:
                 return (albedo * 100.0).astype(np.float32)
-            return np.floor(np.sqrt(100.0 * albedo) * 25.5 + 0.5).astype(np.float32)
+            return np.minimum(np.floor(np.sqrt(100.0 * albedo) * 25.5 + 0.5), 255.0).astype(np.float32)
         if calTypeOut == self.CAL_ALB:
             raise ValueError(f"Band {band} is infrared; it can be calibrated to RAD, TEMP or BRIT, not ALB.")
         gain, bias = self._gain_bias(band)
