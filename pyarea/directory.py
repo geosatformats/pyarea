@@ -12,11 +12,12 @@ logger = logging.getLogger(n)
 
 
 
-import re
 import struct
 
 
-_PREGVAR_SENSOR = re.compile(r'^((?:SMS|GOES)-\d+) (visible|infrared)')
+# sensor numbers 16-33 are SMS-1, SMS-2 and GOES-1..7, each as a visible number followed by an infrared one
+_PREGVAR_FIRST_SENSOR = 16
+_PREGVAR_PLATFORMS = ("SMS-1", "SMS-2") + tuple(f"GOES-{n}" for n in range(1, 8))
 
 # http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#13797
 HEADER_FIELDS = (
@@ -395,10 +396,9 @@ class _DirectoryMixin:
     @property
     def sensor(self):
         """Short platform name, e.g. ``GOES-3`` or ``GOES8`` (None if there isn't one)."""
+        if self.satellite is not None:
+            return self.satellite
         text = self.sensor_name
-        match = _PREGVAR_SENSOR.match(text)
-        if match:
-            return match.group(1)
         if ' ' in text:
             stext = text.split(' ')
             if 'GOES' in stext:
@@ -407,18 +407,22 @@ class _DirectoryMixin:
             return text
 
     @property
+    def _pregvar_index(self):
+        """0-17 for the SMS-1..GOES-7 sensor numbers (visible, infrared, ...), otherwise None."""
+        index = self.sensor_source_number - _PREGVAR_FIRST_SENSOR
+        return index if 0 <= index < 2 * len(_PREGVAR_PLATFORMS) else None
+
+    @property
     def satellite(self):
         """Pre-GVAR platform name (``SMS-1``, ``GOES-3``...) or None for any other source."""
-        match = _PREGVAR_SENSOR.match(self.sensor_name)
-        return match.group(1) if match else None
+        index = self._pregvar_index
+        return None if index is None else _PREGVAR_PLATFORMS[index // 2]
 
     @property
     def band(self):
         """``VIS`` or ``IR`` for pre-GVAR SMS/GOES sensor numbers, otherwise None."""
-        match = _PREGVAR_SENSOR.match(self.sensor_name)
-        if not match:
-            return None
-        return "VIS" if match.group(2) == "visible" else "IR"
+        index = self._pregvar_index
+        return None if index is None else ("VIS", "IR")[index % 2]
 
     @property
     def ssp(self):
