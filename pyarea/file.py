@@ -123,7 +123,7 @@ class AreaFile(BytesIO):
         :return:
         """
 
-        mask = np.ones(( self.lines, self.num_bands*self.elements + self.prefix_len), dtype=np.bool)
+        mask = np.ones(( self.lines, self.num_bands*self.elements + self.prefix_len), dtype=bool)
         #all at once, no loops
         mask[ :,:self.prefix_len] = False
         # pylab.imshow(mask)
@@ -274,7 +274,7 @@ class AreaFile(BytesIO):
                 #TODO line prefix bytes
 
                 for bi in range(self.num_bands):
-                    aft.write(self.data[bi,:,:].tostring())
+                    aft.write(self.data[bi,:,:].tobytes())
 
 
             if compress_level is not None:
@@ -428,7 +428,7 @@ class AreaFile(BytesIO):
                 lines = prfx1[:, INT32SIZE:]
             else:
                 lines = prfx1
-            valid_lines_mask = lines[:, 22].view(np.bool)
+            valid_lines_mask = lines[:, 22].view(bool)
             valid_lines = lines[valid_lines_mask]
             if not lines.size > 0:
                 raise Exception('The Area files dodo not have any valid lines as per block0 data form the line prefix')

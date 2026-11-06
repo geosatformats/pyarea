@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyarea"
+version = "0.2.0.dev0"
+description = "Reader for McIDAS AREA files (python port of edu.wisc.ssec.mcidas)"
+readme = "README"
+license = { text = "LGPL-3.0-or-later" }
+authors = [{ name = "Ioan Ferencik" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "numexpr", "pyproj"]
+
+[project.optional-dependencies]
+pregvar = ["numba"]
+test = ["pytest", "pytest-cov", "numba"]
+
+[tool.setuptools]
+packages = ["pyarea", "pyarea.navigation", "pyarea.pregvar"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
