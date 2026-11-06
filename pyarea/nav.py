@@ -1,4 +1,5 @@
 __author__ = 'jano'
+import collections
 import gc
 import math
 import struct
@@ -10,6 +11,16 @@ import numpy as np
 from numpy import nan
 
 from pyarea import utils
+
+try:
+    import numba
+
+    _njit = numba.njit
+except ImportError:  # slower, but everything still works without numba
+
+    def _njit(func):
+        return func
+
 
 ne.set_num_threads(cpu_count())
 logger = logging.getLogger('nav')
@@ -136,17 +147,19 @@ class AreaNav():
                       struct.pack('{byte_order:s}{format_str:s}'.format(byte_order=byte_order, format_str=int_format),
                                   navblock[0]))[0]
         #navtype = .from_bytes(navblock[:4])
-        navtype = navtype.decode()
+        navtype = navtype.decode(errors='replace')
 
         #evaluate dynamically, does have the advantage of being self updateable
         #nav_classes = [klass.code_string() for name, klass in globals().items() if 'nav' in name.lower() and issubclass(klass, AreaNav)]
-        nav_classes = cls.get_subclasses()
+        # a concrete subclass is built directly (its __init__ validates the block);
+        # only AreaNav itself has to find the right subclass from the nav type
+        nav_classes = cls.get_subclasses() if cls is AreaNav else [cls]
 
 
 
         # dynamically create the new class
         for klass in nav_classes:
-            if klass.__name__.startswith(navtype):
+            if cls is not AreaNav or klass.__name__.startswith(navtype):
                 inst = object.__new__(klass)
                 inst.navtype = navtype
                 inst.byte_order = byte_order
@@ -1299,213 +1312,419 @@ class LALONav(AreaNav):
         pass
 
 
+GOES_MAGIC = b"GOES"
+
+_RDPDG = np.pi / 180.0
+_MCMISSING = -2139062144  # McIDAS "missing" (0x80808080 as signed int32), used for iarr[28]/skew
+
+_EQUATORIAL_RADIUS_KM = 6378.137
+
+
+def _packed_to_double(value):
+    """Convert a packed decimal integer to double degrees (or hours).
+
+    Mirrors McIDASUtil.mcPackedIntegerToDouble: SIGN DDD MM SS (or HH MM SS).
+    """
+    val = abs(int(value))
+    dvalue = (val // 10000) + ((val // 100) % 100) / 60.0 + (val % 100) / 3600.0
+    return -dvalue if value < 0 else dvalue
+
+
+def _icon1(yymmdd):
+    """YYMMDD -> YYDDD (year/day-of-year), per nvxgoes ICON1."""
+    num = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    year = (yymmdd // 10000) % 100
+    month = (yymmdd // 100) % 100
+    day = yymmdd % 100
+    if month < 1 or month > 12:
+        month = 1
+    julday = day + num[month - 1]
+    if year % 4 == 0 and month > 2:
+        julday += 1
+    return 1000 * year + julday
+
+
+def _leapyr(iy):
+    return 366 - ((iy % 4) + 3) // 4
+
+
+def _mc_daytime_to_secs(yrday, hms):
+    """Convert a YYDDD day and HHMMSS time to seconds since the epoch.
+
+    Matches McIDASUtil.mcDayTimeToSecs closely enough for the *difference*
+    used in timdif() below (which is all this port needs -- it's only ever
+    used as raha's time delta).
+    """
+    year = yrday // 1000
+    year = 1900 + year if year >= 30 else 2000 + year
+    day = yrday % 1000
+    # days since a fixed reference (Jan 1 of `year`), matching Java's
+    # Calendar-based day-of-year approach for the purpose of subtraction
+    dt = datetime.datetime(year, 1, 1) + datetime.timedelta(days=day - 1)
+    seconds = _packed_to_double(hms) * 3600.0
+    epoch = datetime.datetime(1970, 1, 1)
+    return (dt - epoch).total_seconds() + seconds
+
+
+def _timdif(yrday1, hms1, yrday2, hms2):
+    return (_mc_daytime_to_secs(yrday2, hms2) - _mc_daytime_to_secs(yrday1, hms1)) / 60.0
+
+
+def _check_magic(iarr, endian):
+    expected = int.from_bytes(GOES_MAGIC, "big" if endian == ">" else "little")
+    got = int(iarr[0]) & 0xFFFFFFFF
+    if got != expected:
+        raise ValueError(
+            f"Not a GOES nav block (word 1 = {iarr[0]!r}, expected "
+            f"{expected!r} for endian={endian!r}; if you're sure the "
+            f"raw bytes are b'GOES', this is probably an endian "
+            f"mismatch -- pass the same endian PregvarAreaFile detected)"
+        )
+
+
+# Scalar constants handed to _to_latlon_kernel() as one immutable bundle
+# (numba treats a namedtuple of floats as a plain struct), instead of a
+# ~45-argument call. Built by GOESNav._kernel_params().
+_KernelParams = collections.namedtuple(
+    "_KernelParams",
+    [
+        # scan / image geometry
+        "numsen", "tmpscl", "pictim", "piclin", "radlin", "radele",
+        "picele", "gamma", "gamdot",
+        # spin-axis rotation matrix (b..) and attitude matrix (rotm..)
+        "b11", "b12", "b13", "b21", "b22", "b23", "b31", "b32", "b33",
+        "rotm11", "rotm13", "rotm21", "rotm23", "rotm31", "rotm33",
+        # earth model and earth-rotation terms
+        "bsq_over_asq", "asq", "bsq", "emega", "xref", "rdpdg",
+        # Kepler orbit (see GOESNav._satvec_init())
+        "tdife", "xmmc", "oeccen", "srome2", "epsiln",
+        "px", "py", "pz", "qx", "qy", "qz",
+    ],
+)
+
+
+def _double_to_packed(dvalue):
+    """Convert double degrees (or hours) to a packed decimal integer."""
+    dval = abs(dvalue)
+    j = int(3600.0 * dval + 0.5)
+    value = 10000 * (j // 3600) + 100 * ((j // 60) % 60) + j % 60
+    return -value if dvalue < 0.0 else value
+
+
+def _anomaly_hours(semima, oeccen, xmeana):
+    """Return the time in hours that the orbit takes to reach the mean anomaly ``xmeana`` (degrees)."""
+    re = 6378.388
+    gracon = 0.07436574
+    axmmc = gracon * (np.sqrt(re / semima)) ** 3
+    xmanom = (np.pi / 180.0) * xmeana
+    return (xmanom - oeccen * np.sin(xmanom)) / (60.0 * axmmc)
+
+
+def _day_rollover(time):
+    """Wrap a time in hours into [0, 24) and return it with the whole-day shift that was applied."""
+    if time > 48.0:
+        return time - 48.0, 2
+    if time > 24.0:
+        return time - 24.0, 1
+    if time < -24.0:
+        return time + 48.0, -2
+    if time < 0.0:
+        return time + 24.0, -1
+    return time, 0
+
+
+def _add_days(ietimy, iday):
+    """Shift a YYDDD epoch by ``iday`` days, following nvxgoes' year rollover."""
+    jyear = (ietimy // 1000) % 100 + 1000
+    jday = ietimy % 1000 + iday
+    if jday < 1:
+        jyear -= 1
+        jday += _leapyr(jyear)
+    elif jday > _leapyr(jyear):
+        jday += _leapyr(jyear)
+        jyear += 1
+    return 1000 * (jyear % 100) + jday
+
+
+def _epoch(ietimy, ietimh, anomaly_hours):
+    """Move the orbit epoch (YYDDD, HHMMSS) back to perigee, ``anomaly_hours`` earlier."""
+    time, iday = _day_rollover(_packed_to_double(ietimh) - anomaly_hours)
+    if iday != 0:
+        ietimy = _add_days(ietimy, iday)
+    return ietimy, _double_to_packed(time)
+
+
+def _validate_nav_words(iarr):
+    """Raise ValueError if the nav block lacks usable orbit, pointing or spin parameters."""
+    problems = (
+        ((iarr[6:12] <= 0).all(),
+         "Invalid orbital parameters (all <= 0) -- this file's nav block has no real orbital elements."),
+        (iarr[4] == 0, "Invalid orbit type"),
+        (not iarr[12:15].any(), "Invalid ascension/declination parameters"),
+        (iarr[15] == 0, "Invalid spin period"),
+    )
+    for failed, message in problems:
+        if failed:
+            raise ValueError(message)
+
+
+def _has_beta_scan_times(iss):
+    """Tell whether satellite source ``iss`` records the first/last scan line times in its nav block."""
+    return iss > 25 or iss == 12
+
+
+@_njit
+def _kepler_position(samtim, p):
+    """Return the satellite position (satx, saty, satz) at time ``samtim``.
+
+    Kepler's equation is solved by fixed-point iteration (see GOESNav._satvec()).
+    """
+    xmanom = p.xmmc * (p.tdife + samtim * 60.0)
+    ecanm1 = xmanom
+    ecanom = ecanm1
+    for _ in range(20):
+        ecanom = xmanom + p.oeccen * math.sin(ecanm1)
+        if abs(ecanom - ecanm1) < p.epsiln:
+            break
+        ecanm1 = ecanom
+    xomega = math.cos(ecanom) - p.oeccen
+    yomega = p.srome2 * math.sin(ecanom)
+    return (
+        xomega * p.px + yomega * p.qx,
+        xomega * p.py + yomega * p.qy,
+        xomega * p.pz + yomega * p.qz,
+    )
+
+
+@_njit
+def _scan_line_state(parlin, p):
+    """Return everything that depends only on the scan-line group ``parlin``.
+
+    That is the sample time, the satellite position, the attitude rotation
+    angle and the cos/sin of the earth-rotation angle.
+    """
+    samtim = p.tmpscl * parlin + p.pictim
+    sat = _kepler_position(samtim, p)
+    xcor = p.b11 * sat[0] + p.b12 * sat[1] + p.b13 * sat[2]
+    ycor = p.b21 * sat[0] + p.b22 * sat[1] + p.b23 * sat[2]
+    rot = math.atan2(ycor, xcor) + math.pi
+    angle = p.emega * samtim + p.xref
+    return samtim, sat, rot, math.cos(angle), math.sin(angle)
+
+
+@_njit
+def _line_of_sight(ylin, yele, p):
+    """Return the line-of-sight vector (elo, emo, eno) for the scan angles ``ylin`` / ``yele``."""
+    coslin, sinlin = math.cos(ylin), math.sin(ylin)
+    sinele, cosele = math.sin(yele), math.cos(yele)
+
+    eli = p.rotm11 * coslin - p.rotm13 * sinlin
+    emi = p.rotm21 * coslin - p.rotm23 * sinlin
+    eni = p.rotm31 * coslin - p.rotm33 * sinlin
+    temp = eli
+    eli = cosele * eli + sinele * emi
+    emi = -sinele * temp + cosele * emi
+
+    return (
+        p.b11 * eli + p.b21 * emi + p.b31 * eni,
+        p.b12 * eli + p.b22 * emi + p.b32 * eni,
+        p.b13 * eli + p.b23 * emi + p.b33 * eni,
+    )
+
+
+@_njit
+def _intersect_earth(sat, los, p):
+    """Intersect a line of sight with the earth ellipsoid.
+
+    Returns ``(hit, point)``; ``hit`` is False (and ``point`` meaningless)
+    where the line of sight misses the earth.
+    """
+    satx, saty, satz = sat
+    elo, emo, eno = los
+    onemsq = 1.0 - p.bsq_over_asq
+    aq = p.bsq_over_asq + onemsq * eno * eno
+    bq = 2.0 * ((elo * satx + emo * saty) * p.bsq_over_asq + eno * satz)
+    cq = (satx * satx + saty * saty) * p.bsq_over_asq + satz * satz - p.bsq
+    rad = bq * bq - 4.0 * aq * cq
+    if rad < 1.0:
+        return False, (0.0, 0.0, 0.0)
+    s = -(bq + math.sqrt(rad)) / (2.0 * aq)
+    return True, (satx + elo * s, saty + emo * s, satz + eno * s)
+
+
+@_njit
+def _geodetic_latlon(point, ct, st, p):
+    """Rotate an earth-surface point into the earth-fixed frame and return (lat, lon), East positive."""
+    x, y, z = point
+    x1 = ct * x + st * y
+    y1 = -st * x + ct * y
+    if x1 == 0.0 and y1 == 0.0:
+        return np.nan, np.nan
+    a = math.atan(z / math.sqrt(x1 * x1 + y1 * y1))
+    lat = math.atan2(p.asq * math.sin(a), p.bsq * math.cos(a)) / p.rdpdg
+    lon = math.atan2(y1, x1) / p.rdpdg
+    return lat, lon
+
+
+@_njit
+def _to_latlon_kernel(xlin, xele, p):
+    """Convert flattened line/element image coordinates to (lat, lon) in degrees.
+
+    Longitude is East positive.
+
+    The satellite position and the quantities derived only from it
+    (earth-rotation angle, attitude rotation) depend on the scan-line
+    group (`parlin`) alone, so they are recomputed only when `parlin`
+    changes from one pixel to the next. For a (line, element) grid
+    flattened in C order -- lines varying slowest -- that is once per
+    line group instead of once per pixel; any other ordering is still
+    correct, just without the saving.
+    """
+    n = xlin.shape[0]
+    lat = np.empty(n, dtype=np.float64)
+    lon = np.empty(n, dtype=np.float64)
+
+    have_line = False
+    last_parlin = 0.0
+    samtim = rot = ct = st = 0.0
+    sat = (0.0, 0.0, 0.0)
+
+    for i in range(n):
+        parlin = (np.rint(xlin[i]) - 1.0) // p.numsen + 1.0
+        if (not have_line) or parlin != last_parlin:
+            have_line = True
+            last_parlin = parlin
+            samtim, sat, rot, ct, st = _scan_line_state(parlin, p)
+
+        ylin = (xlin[i] - p.piclin) * p.radlin
+        yele = (xele[i] - p.picele + p.gamma + p.gamdot * samtim) * p.radele - rot
+        hit, point = _intersect_earth(sat, _line_of_sight(ylin, yele, p), p)
+        if hit:
+            lat[i], lon[i] = _geodetic_latlon(point, ct, st, p)
+        else:
+            lat[i] = np.nan
+            lon[i] = np.nan
+    return lat, lon
+
+
+
 class GOESNav(AreaNav):
+    """Navigation for pre-GVAR SMS/GOES-1..7 VISSR/VAS AREA files (nav type "GOES").
+
+    Port of edu.wisc.ssec.mcidas.GOESnav (itself a port of the McIDAS-X
+    nvxgoes codicil), with the per-pixel earth location compiled by numba
+    when it is installed. The image-coordinate setup is the usual AreaNav
+    one: call :meth:`setImageStart`, :meth:`setRes`, :meth:`setStart` and
+    :meth:`setMag` (``AreaFile.navigation`` does this for you).
+
+    ``toLatLon``/``toLinEle`` take and return ``[[elements], [lines]]`` /
+    ``[[lats], [lons]]`` lists like the other navigation classes;
+    :meth:`to_latlon` and :meth:`to_lin_ele` are the array versions.
+    """
+
     isEastPositive = True
 
-    # NAVCOM variables
-    navday = nan
-    lintot = nan
-    deglin = nan
-    ieltot = nan
-    degele = nan
-    spinra = nan
-    ietimy = nan
-    ietimh = nan
-    semima = nan
-    oeccen = nan
-    orbinc = nan
-    perhel = nan
-    asnode = nan
-    nopcln = nan
-    declin = nan
-    rascen = nan
-    piclin = nan
-    prerat = nan
-    predir = nan
-    pitch = nan
-    yaw = nan
-    roll = nan
-    skew = nan
-
-    # BETCOM variables
-    iajust = nan
-    ibtcon = nan
-    negbet = nan
-    iseang = nan
-
-    # VASCOM variables
-    scan1 = nan
-    time1 = nan
-    scan2 = nan
-    time2 = nan
-
-    # NAVINI variables
-    emega = nan
-    ab = nan
-    asq = nan
-    bsq = nan
-    r = nan
-    rsq = nan
-    rdpdg = nan
-    numsen = nan
-    totlin = nan
-    radlin = nan
-    totele = nan
-    radele = nan
-    picele = nan
-    cpitch = nan
-    cyaw = nan
-    croll = nan
-    pskew = nan
-    rfact = nan
-    roasin = nan
-    tmpscl = nan
-    b11 = nan
-    b12 = nan
-    b13 = nan
-    b21 = nan
-    b22 = nan
-    b23 = nan
-    b31 = nan
-    b32 = nan
-    b33 = nan
-    gamma = nan
-    gamdot = nan
-    rotm11 = nan
-    rotm13 = nan
-    rotm21 = nan
-    rotm23 = nan
-    rotm31 = nan
-    rotm33 = nan
-    pictim = nan
-    xref = nan
-
-    iold = 0
-
-    # variables needed for satvec
-    tdife = nan
-    xmmc = nan
-    epsiln = nan
-    srome2 = nan
-    pz = nan
-    py = nan
-    px = nan
-    qz = nan
-    qy = nan
-    qx = nan
-
     def __init__(self, navblock=None, auxblock=None, **kwargs):
+        """Set up the navigation from the nav block words.
 
-        navtype = \
-        struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=4, format_str='s'),
-                      struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1,
-                                                                                format_str=self.int_format),
-                                  navblock[self.STTYPE]))[0]
-        if navtype != self.GOES:
-            raise Exception(f'Invalid navigation type {navtype}')
-        jday = navblock[1]
-        jtime = navblock[2]
+        Requires a nav block with real, populated orbital elements.
 
-        # INTIALIZE NAVCOM
-        self.navday = jday % 100000
-        # print jday, jtime, self.navday
+        Args:
+            navblock: Raw nav-block words as signed 32-bit ints (0-based;
+                ``navblock[0]`` is the 4 ASCII bytes ``GOES``).
+            auxblock: Unused, kept for the AreaNav interface.
+            **kwargs: ``byte_order`` ('>' or '<') and ``int_format`` as
+                passed by :class:`AreaNav`; the byte order is needed
+                because the ``GOES`` magic word is 4 ASCII bytes
+                reinterpreted as an int32 in the file's byte order.
+        """
+        iarr = np.asarray(navblock, dtype=np.int64)
+        _check_magic(iarr, self.byte_order)
+        _validate_nav_words(iarr)
 
-        # for i in range(6,12):
-        #     if navblock[i] <=0:
-        #         raise RuntimeError('Invalid orbital parameter {}:{}. Should be greater than 0'.format(i, navblock[i]) )
+        self.navday = int(iarr[1]) % 100000
+        self._set_constants()
+        self._set_orbit(iarr)
+        self._set_scan_geometry(iarr)
+        self._set_attitude(iarr)
+        self._set_spin_axis(iarr)
+        self._set_timing(iarr)
+        self._satvec_init()
 
-        self.ietimy = self.icon1(navblock[4])
-        self.ietimh = 100 * (navblock[5] / 100) + round(.6 * (navblock[5] % 100))
-        self.semima = navblock[6] / 100.
-        self.oeccen = navblock[7] / 1000000.
-        self.orbinc = navblock[8] / 1000.
-        self.xmeana = navblock[9] / 1000.
-        self.perhel = navblock[10] / 1000.
-        self.asnode = navblock[11] / 1000.
-        # print self.ietimy
-        # print self.ietimh
-        # call epoch
-        self.epoch()
-        # print self.ietimy
-        # print self.ietimh
-        self.declin = utils.mcPI2F(navblock[12])
-        self.rascen = utils.mcPI2F(navblock[13])
-        self.piclin = navblock[14]
-        if navblock[14] > 1000000:
-            self.piclin /= 10000
-        if (navblock[12] == 0 and navblock[13] == 0 and navblock[14] == 0):
-            raise ValueError('Invalid ascension/declination parameters')
-        if navblock[15] == 0:
-            raise ValueError('Invalid spin period')
-        self.spinra = navblock[15] / 1000.
-        if navblock[15] != 0 and self.spinra < 300:
-            self.spinra = 60000. / self.spinra
-        self.deglin = utils.mcPI2F(navblock[16])
-        self.lintot = navblock[17]
-        self.degele = utils.mcPI2F(navblock[18])
-        self.ieltot = navblock[19]
-        self.pitch = utils.mcPI2F(navblock[20])
-        self.yaw = utils.mcPI2F(navblock[21])
-        self.roll = utils.mcPI2F(navblock[22])
-        self.skew = navblock[28] / 100000.
-        if navblock[28] == utils.MCMISSING:
-            self.skew = 0.
-        ## BETCOM
-        self.iajust = navblock[24]
-        self.iseang = navblock[27]
-        self.ibtcon = 6289920
-        self.negbet = 3144960
-
-        ## ----- NAVINI
-        self.emega = .26251617
+    def _set_constants(self):
+        """Set the earth model and earth-rotation constants."""
+        self.emega = 0.26251617
         self.ab = 40546851.22
         self.asq = 40683833.48
         self.bsq = 40410330.18
-        self.r = 6371.22
+        self.r = 6371.221
+        self.rdpdg = 1.745329252e-02
+        self.bsq_over_asq = self.bsq / self.asq
         self.rsq = self.r ** 2
-        self.rdpdg = 1.745329252E-02
-        self.numsen = (self.lintot / 100000) % 100
-        if self.numsen < 1:
-            self.numsen = 1
-        self.totlin = self.numsen * (self.lintot % 100000)
-        self.radlin = self.rdpdg * self.deglin / (self.totlin - 1.)
-        self.totele = self.ieltot
-        self.radele = self.rdpdg * self.degele / (self.totele - 1.)
-        self.picele = (1. + self.totele) / 2.
-        self.cpitch = self.rdpdg * self.pitch
-        self.cyaw = self.rdpdg * self.yaw
-        self.croll = self.rdpdg * self.roll
 
-        self.pskew = math.atan2(self.skew, self.radlin / self.radele)
+    def _set_orbit(self, iarr):
+        """Set the Kepler orbital elements and the orbit epoch from the nav block."""
+        ietimy = _icon1(int(iarr[4]))
+        ietimh = 100 * (int(iarr[5]) // 100) + round(0.6 * (int(iarr[5]) % 100))
+        self.semima = iarr[6] / 100.0
+        self.oeccen = iarr[7] / 1000000.0
+        self.orbinc = iarr[8] / 1000.0
+        xmeana = iarr[9] / 1000.0
+        self.perhel = iarr[10] / 1000.0
+        self.asnode = iarr[11] / 1000.0
+        self.ietimy, self.ietimh = _epoch(ietimy, ietimh, _anomaly_hours(self.semima, self.oeccen, xmeana))
 
-        stp = math.sin(self.cpitch)
-        ctp = math.cos(self.cpitch)
+    def _set_scan_geometry(self, iarr):
+        """Set the spin-scan geometry: picture center, spin rate and angles per line/element."""
+        piclin = float(iarr[14])
+        if iarr[14] >= 1000000:
+            piclin = piclin / 10000.0
+        self.piclin = piclin
 
-        sty = math.sin(self.cyaw - self.pskew)
-        cty = math.cos(self.cyaw - self.pskew)
+        spinra = iarr[15] / 1000.0
+        if spinra < 300.0:
+            spinra = 60000.0 / spinra
+        self.tmpscl = spinra / 3600000.0
 
-        _str = math.sin(self.croll)
-        ctr = math.cos(self.croll)
+        deglin = _packed_to_double(int(iarr[16]))
+        lintot = int(iarr[17])
+        degele = _packed_to_double(int(iarr[18]))
+        ieltot = int(iarr[19])
+        self.numsen = max((lintot // 100000) % 100, 1)
+        totlin = self.numsen * (lintot % 100000)
+        self.radlin = self.rdpdg * deglin / (totlin - 1.0)
+        self.radele = self.rdpdg * degele / (ieltot - 1.0)
+        self.picele = (1.0 + ieltot) / 2.0
 
+    def _set_attitude(self, iarr):
+        """Set the attitude rotation matrix from pitch, yaw, roll and skew."""
+        cpitch = self.rdpdg * _packed_to_double(int(iarr[20]))
+        cyaw = self.rdpdg * _packed_to_double(int(iarr[21]))
+        croll = self.rdpdg * _packed_to_double(int(iarr[22]))
+        skew = 0.0 if iarr[28] == _MCMISSING else iarr[28] / 100000.0
+
+        pskew = np.arctan2(skew, self.radlin / self.radele)
+        stp, ctp = np.sin(cpitch), np.cos(cpitch)
+        sty, cty = np.sin(cyaw - pskew), np.cos(cyaw - pskew)
+        str_, ctr = np.sin(croll), np.cos(croll)
         self.rotm11 = ctr * ctp
-        self.rotm13 = sty * _str * ctp + cty * stp
-        self.rotm21 = -_str
+        self.rotm13 = sty * str_ * ctp + cty * stp
+        self.rotm21 = -str_
         self.rotm23 = sty * ctr
         self.rotm31 = -ctr * stp
-        self.rotm33 = cty * ctp - sty * _str * stp
+        self.rotm33 = cty * ctp - sty * str_ * stp
         self.rfact = self.rotm31 ** 2 + self.rotm33 ** 2
-        self.roasin = math.atan2(self.rotm31, self.rotm33)
-        self.tmpscl = self.spinra / 3600000.
-        dec = self.declin * self.rdpdg
-        sindec = math.sin(dec)
-        cosdec = math.cos(dec)
-        ras = self.rascen * self.rdpdg
-        sinras = math.sin(ras)
-        cosras = math.cos(ras)
+        self.roasin = np.arctan2(self.rotm31, self.rotm33)
 
+    def _set_spin_axis(self, iarr):
+        """Set the spin-axis rotation matrix from the declination and right ascension."""
+        dec = _packed_to_double(int(iarr[12])) * self.rdpdg
+        sindec, cosdec = np.sin(dec), np.cos(dec)
+        ras = _packed_to_double(int(iarr[13])) * self.rdpdg
+        sinras, cosras = np.sin(ras), np.cos(ras)
         self.b11 = -sinras
         self.b12 = cosras
-        self.b13 = 0.
+        self.b13 = 0.0
         self.b21 = -sindec * cosras
         self.b22 = -sindec * sinras
         self.b23 = cosdec
@@ -1513,615 +1732,290 @@ class GOESNav(AreaNav):
         self.b32 = cosdec * sinras
         self.b33 = sindec
 
-        jan_1_1974 = datetime.datetime(year=1974, month=1, day=1)
-        nav_daytime = utils.yyyddd_hhmmss2datetime(self.navday, 0)
-        diff = nav_daytime - jan_1_1974
-        time_diff_mins = diff.total_seconds() / 60.
-        raha = time_diff_mins * 1.00273791 / 4.0 + 100.26467
+    def _set_timing(self, iarr):
+        """Set the earth-rotation reference, the picture time and the scan line times."""
+        raha = _timdif(74001, 0, self.navday, 0) * 1.00273791 / 4.0 + 100.26467
+        self.xref = (raha % 360.0) * self.rdpdg
+        self.pictim = _packed_to_double(int(iarr[2]))
+        self.gamma = float(iarr[38]) / 100.0
+        self.gamdot = float(iarr[39]) / 100.0
+        self._set_scan_times(iarr)
 
-        rac = raha % 360.
-        if rac < 0:
-            rac += 360.
-        self.xref = rac * self.rdpdg
-        # TIME SPECIFIC
-        self.pictim = utils.mcPI2F(jtime)
-        self.gamma = navblock[38] / 100.
-        self.gamdot = navblock[39] / 100.
-
-        # VASCOM
-        iss = jday / 100000
-        if (iss > 25 or iss == 12) and navblock[30] > 0:
-
-            #       THIS SECTION DOES VAS BIRDS AND GMS
-            #       IT USES TIMES AND SCAN LINE FROM BETA RECORDS
-
-            self.scan1 = float(navblock[30])
-            self.time1 = utils.mcPI2F(navblock[31])
-            self.scan2 = float(navblock[34])
-            self.time2 = utils.mcPI2F(navblock[35])
+    def _set_scan_times(self, iarr):
+        """Set the first/last scan line numbers and times."""
+        if iarr[30] > 0 and _has_beta_scan_times(int(iarr[1]) // 100000):
+            self.scan1 = float(iarr[30])
+            self.time1 = _packed_to_double(int(iarr[31]))
+            self.scan2 = float(iarr[34])
+            self.time2 = _packed_to_double(int(iarr[35]))
         else:
-            # THIS SECTION DOES THE OLD GOES BIRDS
-            self.scan1 = 1.
-            self.time1 - utils.mcPI2F(jtime)
-            self.scan2 = float(self.lintot % 100000)
+            self.scan1 = 1.0
+            self.time1 = self.pictim
+            self.scan2 = float(int(iarr[17]) % 100000)
             self.time2 = self.time1 + self.scan2 * self.tmpscl
 
-        self.iold = 0
+    def _satvec_init(self):
+        """Precompute the orbital-plane basis vectors used by _satvec().
 
-    def toLatLon(self, linele=None):
+        Only called for the normal Kepler-propagated constructor.
+        """
+        rdpdg = np.pi / 180.0
+        re = 6378.388
+        gracon = 0.07436574
 
-        number = len(linele[0])
-        latlon = [[nan for i in range(number)], [nan for i in range(number)]]
+        o = rdpdg * self.orbinc
+        p = rdpdg * self.perhel
+        a = rdpdg * self.asnode
+        so, co = np.sin(o), np.cos(o)
+        sp, cp = np.sin(p) * self.semima, np.cos(p) * self.semima
+        sa, ca = np.sin(a), np.cos(a)
+        self._px = cp * ca - sp * sa * co
+        self._py = cp * sa + sp * ca * co
+        self._pz = sp * so
+        self._qx = -sp * ca - cp * sa * co
+        self._qy = -sp * sa + cp * ca * co
+        self._qz = cp * so
+        self._srome2 = np.sqrt(1.0 - self.oeccen) * np.sqrt(1.0 + self.oeccen)
+        self._xmmc = gracon * re * np.sqrt(re / self.semima) / self.semima
 
-        imglinele = self.areaCoordtoImageCoord(linele)
-        for point in range(number):
-            xlin = imglinele[self.indexLine][point]
-            xele = imglinele[self.indexEle][point]
-            ilin = round(xlin)
-            parlin = (ilin - 1) / self.numsen + 1
-            framet = self.tmpscl * parlin
-            samtim = framet + self.pictim
-            xyz = self.satvec(samtim)
-            # print xyz
-            ylin = (xlin - self.piclin) * self.radlin
-            yele = (xele - self.picele + self.gamma + self.gamdot * samtim) * self.radele
+        iey = (self.ietimy // 1000) % 100
+        ied = self.ietimy % 1000
+        iefac = (iey - 1) // 4 + 1
+        de = 365 * (iey - 1) + iefac + ied - 1
+        te = 1440.0 * de + 60.0 * _packed_to_double(self.ietimh)
 
-            xcor = self.b11 * xyz[0] + self.b12 * xyz[1] + self.b13 * xyz[2]
-            ycor = self.b21 * xyz[0] + self.b22 * xyz[1] + self.b23 * xyz[2]
-            rot = math.atan2(ycor, xcor) + math.pi
-            yele = yele - rot
-            coslin = math.cos(ylin)
-            sinlin = math.sin(ylin)
-            sinele = math.sin(yele)
-            cosele = math.cos(yele)
-            eli = self.rotm11 * coslin - self.rotm13 * sinlin
-            emi = self.rotm21 * coslin - self.rotm23 * sinlin
-            eni = self.rotm31 * coslin - self.rotm33 * sinlin
-            temp = eli
-            eli = cosele * eli + sinele * emi
-            emi = -sinele * temp + cosele * emi
-            elo = self.b11 * eli + self.b21 * emi + self.b31 * eni
-            emo = self.b12 * eli + self.b22 * emi + self.b32 * eni
-            eno = self.b13 * eli + self.b23 * emi + self.b33 * eni
-            basq = self.bsq / self.asq
-            onemsq = 1.0 - basq
-            aq = basq + onemsq * math.pow(eno, 2)
-            bq = 2.0 * ((elo * xyz[0] + emo * xyz[1]) * basq + eno * xyz[2])
-            cq = (math.pow(xyz[0], 2) + math.pow(xyz[1], 2)) * basq + math.pow(xyz[2], 2) - self.bsq
-            rad = math.pow(bq, 2) - 4.0 * aq * cq
-            if rad < 1.0:
-                latlon[self.indexLat][point] = nan
-                latlon[self.indexLon][point] = nan
-            else:
-                s = -(bq + math.sqrt(rad)) / (2.0 * aq)
-                x = xyz[0] + elo * s
-                y = xyz[1] + emo * s
-                z = xyz[2] + eno * s
+        inavy = (self.navday // 1000) % 100
+        inavd = self.navday % 1000
+        infac = (inavy - 1) // 4 + 1
+        dnav = 365 * (inavy - 1) + infac + inavd - 1
 
-                ct = math.cos(self.emega * samtim + self.xref)
-                st = math.sin(self.emega * samtim + self.xref)
-                x1 = ct * x + st * y
-                y1 = -st * x + ct * y
-                ll = self.nxyzll(x1, y1, z)
-                latlon[self.indexLat][point] = float(ll[0])
-                # put longitude into East Positive (form)
-                if self.isEastPositive:
-                    rlat = -ll[1]
-                    latlon[self.indexLon][point] = float(rlat)
-                else:
-                    latlon[self.indexLon][point] = float(ll[1])
+        self._tdife = dnav * 1440.0 - te
+        self._epsiln = 1.0e-8
 
-        return latlon
+    def _satvec(self, samtim):
+        """Return the satellite position (x, y, z) at time ``samtim``.
 
-    def nxyzll(self, x, y, z):
-        '''
-        SUBROUTINE NXYZLL(X,Y,Z,XLAT,XLON)
-        CONVERT EARTH-CENTERED X,Y,Z TO LAT & LON
-        X,Y,Z ARE GIVEN IN KM. THEY ARE THE COORDINATES IN A RECTANGULAR
-        COORDINATE SYSTEM WITH ORIGIN AT THE EARTH CENTER, WHOSE POS.
-        X-AXIS PIERCES THE EQUATOR AT LON 0 DEG, WHOSE POSITIVE Y-AXIS
-        PIERCES THE EQUATOR AT LON 90 DEG, AND WHOSE POSITIVE Z-AXIS
-        INTERSECTS THE NORTH POLE.
-        XLAT,XLON ARE IN DEGREES, WITH NORTH AND WEST POSITIVE
-        '''
-        xlat = nan
-        xlon = nan
-        if x != 0 and y != 0 and z != 0:
-            a = math.atan(z / math.sqrt(x * x + y * y))
-            xlat = math.atan2(self.asq * math.sin(a), self.bsq * math.cos(a)) / self.rdpdg
-            xlon = -math.atan2(y, x) / self.rdpdg
+        ``samtim`` may be a numpy array; the result is ECI-ish arrays
+        (Earth-center-to-satellite, in the pre-earth-rotation frame that
+        to_latlon()/get_subpoint() then rotate by (emega*samtim+xref)).
 
-        return xlat, xlon
+        Kepler's-equation solve from real orbital elements (fixed-point
+        iteration, matching the Java's plain loop).
+        """
+        samtim = np.asarray(samtim, dtype=np.float64)
 
-    def satvec(self, samtim):
-
-        if self.iold != 1:
-            self.iold = 1
-
-            PI = 3.14159265
-            rdpdg = PI / 180.0
-            re = 6378.388
-            gracon = .07436574
-            sha = 100.26467
-            sha = rdpdg * sha
-            irayd = 74001
-            irahms = 0
-            o = rdpdg * self.orbinc
-            p = rdpdg * self.perhel
-            a = rdpdg * self.asnode
-
-            so = math.sin(o)
-            co = math.cos(o)
-            sp = math.sin(p) * self.semima
-            cp = math.cos(p) * self.semima
-            sa = math.sin(a)
-            ca = math.cos(a)
-            self.px = cp * ca - sp * sa * co
-            self.py = cp * sa + sp * ca * co
-            self.pz = sp * so
-            self.qx = -sp * ca - cp * sa * co
-            self.qy = -sp * sa + cp * ca * co
-            self.qz = cp * so
-            self.srome2 = ((1. - self.oeccen) ** .5) * ((1 + self.oeccen) ** .5)
-            self.xmmc = gracon * re * ((re / self.semima) ** .5) / self.semima
-            iey = (self.ietimy / 1000) % 100
-            ied = self.ietimy % 1000
-            iefac = (iey - 1) / 4 + 1
-            de = 365 * (iey - 1) + iefac + ied - 1
-
-            te = 1440. * de + 60. * utils.mcPI2F(self.ietimh)
-
-            iray = irayd / 1000
-            irad = irayd % 1000
-            irafac = (iray - 1) / 4 + 1
-            dra = 365 * (iray - 1) + irafac + irad - 1
-            tra = 1440. * dra + 60. * utils.mcPI2F(irahms)
-
-            inavy = (self.navday / 1000) % 100
-            inavd = self.navday % 1000
-            infac = (inavy - 1) / 4 + 1
-            dnav = 365 * (inavy - 1) + infac + inavd - 1
-            self.tdife = float(dnav) * 1440. - te  # tdifra = dnav * 1440. - tra
-        self.epsiln = 1.0E-8  # guess this is a BUG in java code because this line is below the upper if a then it is used below
-
-        timsam = samtim * 60.
-        diftim = self.tdife + timsam
-        xmanom = self.xmmc * diftim
-        ecanm1 = xmanom
-        ecanom = 0
-
-        for i in range(20):
+        timsam = samtim * 60.0
+        diftim = self._tdife + timsam
+        xmanom = self._xmmc * diftim
+        ecanm1 = xmanom.copy()
+        ecanom = ecanm1
+        for _ in range(20):
             ecanom = xmanom + self.oeccen * np.sin(ecanm1)
-            if np.all(ecanom - ecanm1 < self.epsiln):
+            if np.all(np.abs(ecanom - ecanm1) < self._epsiln):
+                ecanm1 = ecanom
                 break
             ecanm1 = ecanom
-
         xomega = np.cos(ecanom) - self.oeccen
-        yomega = self.srome2 * np.sin(ecanom)
-
-        z = xomega * self.pz + yomega * self.qz
-        y = xomega * self.py + yomega * self.qy
-        x = xomega * self.px + yomega * self.qx
+        yomega = self._srome2 * np.sin(ecanom)
+        x = xomega * self._px + yomega * self._qx
+        y = xomega * self._py + yomega * self._qy
+        z = xomega * self._pz + yomega * self._qz
         return x, y, z
 
-    def toLinEle(self, latlon=None):
+    def _nxyzll(self, x, y, z):
+        """Convert earth-fixed x, y, z to geodetic (lat, lon) in degrees, with lon positive West."""
+        with np.errstate(invalid="ignore", divide="ignore"):
+            a = np.arctan(z / np.sqrt(x * x + y * y))
+            lat = np.arctan2(self.asq * np.sin(a), self.bsq * np.cos(a)) / self.rdpdg
+            lon = -np.arctan2(y, x) / self.rdpdg
+        bad = (x == 0.0) & (y == 0.0)
+        lat = np.where(bad, np.nan, lat)
+        lon = np.where(bad, np.nan, lon)
+        return lat, lon
 
-        number = len(latlon[0])
-        linele = [[nan for i in range(number)], [nan for i in range(number)]]
+    def _area_to_image(self, line, elem):
+        """AREAnav.areaCoordToImageCoord, unflipped case."""
+        img_line = self.startImageLine + (self.resLine * (line - self.startLine)) / self.magLine
+        img_elem = self.startImageElement + (self.resElement * (elem - self.startElement)) / self.magElement
+        return img_line, img_elem
 
-        for point in range(number):
-            xpar = latlon[self.indexLat][point]
-            # expects positive West Longitude.
-            ypar = latlon[self.indexLon][point]
-            if self.isEastPositive:
-                ypar = -ypar
-            xlin = nan
-            xele = nan
+    def _image_to_area(self, line, elem):
+        """AREAnav.imageCoordToAreaCoord, unflipped case."""
+        area_line = self.startLine + (self.magLine * (line - self.startImageLine)) / self.resLine
+        area_elem = self.startElement + (self.magElement * (elem - self.startImageElement)) / self.resElement
+        return area_line, area_elem
 
-            # if abs(xpar <= 90.:) original
-            _xpar = np.abs(xpar)
-            if np.any(_xpar <= 90.):
-                oldlin = 910.
-                orbtim = -99999.
-                xsat = ysat = zsat = 0.0
-                x = y = z = 0.0
-                xht = znorm = 0.0
-                xyz = self.nllxyz(xpar, ypar)
-                x1 = xyz[0]
-                y1 = xyz[1]
-                z = xyz[2]
-                samtim = self.time1
+    def _kernel_params(self):
+        """Bundle the scalar constants _to_latlon_kernel() needs."""
+        return _KernelParams(
+            numsen=float(self.numsen), tmpscl=float(self.tmpscl),
+            pictim=float(self.pictim), piclin=float(self.piclin),
+            radlin=float(self.radlin), radele=float(self.radele),
+            picele=float(self.picele), gamma=float(self.gamma),
+            gamdot=float(self.gamdot),
+            b11=float(self.b11), b12=float(self.b12), b13=float(self.b13),
+            b21=float(self.b21), b22=float(self.b22), b23=float(self.b23),
+            b31=float(self.b31), b32=float(self.b32), b33=float(self.b33),
+            rotm11=float(self.rotm11), rotm13=float(self.rotm13),
+            rotm21=float(self.rotm21), rotm23=float(self.rotm23),
+            rotm31=float(self.rotm31), rotm33=float(self.rotm33),
+            bsq_over_asq=float(self.bsq_over_asq), asq=float(self.asq),
+            bsq=float(self.bsq), emega=float(self.emega),
+            xref=float(self.xref), rdpdg=float(self.rdpdg),
+            tdife=float(self._tdife), xmmc=float(self._xmmc),
+            oeccen=float(self.oeccen), srome2=float(self._srome2),
+            epsiln=float(self._epsiln),
+            px=float(self._px), py=float(self._py), pz=float(self._pz),
+            qx=float(self._qx), qy=float(self._qy), qz=float(self._qz),
+        )
 
-                for i in range(2):
-                    if abs(samtim - orbtim) >= 0.0005:
-                        xyzsat = self.satvec(samtim)
-                        xsat = xyzsat[0]
-                        ysat = xyzsat[1]
-                        zsat = xyzsat[2]
-                        orbtim = samtim
-                        xht = math.sqrt(math.pow(xyzsat[0], 2) + math.pow(xyzsat[1], 2) + math.pow(xyzsat[2], 2))
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates) to (lat, lon) in degrees.
 
-                    ct = math.cos(self.emega * samtim + self.xref)
-                    st = math.sin(self.emega * samtim + self.xref)
-                    x = ct * x1 - st * y1
-                    y = st * x1 + ct * y1
-                    vcste1 = x - xsat
-                    vcste2 = y - ysat
-                    vcste3 = z - zsat
-                    vcses3 = self.b31 * vcste1 + self.b32 * vcste2 + self.b33 * vcste3
-                    znorm = np.sqrt(np.power(vcste1, 2) + np.power(vcste2, 2) + np.power(vcste3, 2))
-                    x3 = vcses3 / znorm
-                    umv = np.arctan2(x3, np.sqrt(self.rfact - np.power(x3, 2))) - self.roasin
-                    xlin = self.piclin - umv / self.radlin
+        East positive / North positive. NaN where the line of sight misses
+        the earth ellipsoid. Accepts any broadcastable pair of arrays and
+        returns arrays of the broadcast shape.
+        """
+        line, elem = np.broadcast_arrays(
+            np.asarray(line, dtype=np.float64),
+            np.asarray(elem, dtype=np.float64),
+        )
+        shape = line.shape
+        xlin, xele = self._area_to_image(line, elem)
+        lat, lon = _to_latlon_kernel(
+            np.ascontiguousarray(xlin).ravel(),
+            np.ascontiguousarray(xele).ravel(),
+            self._kernel_params(),
+        )
+        return lat.reshape(shape), lon.reshape(shape)
 
-                    if i == 0:
-                        samtim = self.time2
-                        oldlin = xlin
+    def get_subpoint(self):
+        """Return the satellite nadir (lat, lon) in degrees, east positive.
 
-                scnnum = ((oldlin + xlin) / 2.0 - 1.0) / self.numsen
-                scnfrc = (scnnum - self.scan1) / (self.scan2 - self.scan1)
-                xlin = oldlin + scnfrc * (xlin - oldlin)
-                samtim = self.time1 + self.tmpscl * (scnnum - self.scan1)
-                xyzsat = self.satvec(samtim)
-                xsat = xyzsat[0]
-                ysat = xyzsat[1]
-                zsat = xyzsat[2]
-                cosa = x * xsat + y * ysat + z * zsat
-                ctst = 0.0001 * self.r * xht + self.rsq
-                if np.any(cosa >= ctst):
-                    xsats1 = self.b11 * xsat + self.b12 * ysat + self.b13 * zsat
-                    ysats2 = self.b21 * xsat + self.b22 * ysat + self.b23 * zsat
-                    ct = np.cos(self.emega * samtim + self.xref)
-                    st = np.sin(self.emega * samtim + self.xref)
-                    x = ct * x1 - st * y1
-                    y = st * x1 + ct * y1
-                    vcste1 = x - xsat
-                    vcste2 = y - ysat
-                    vcste3 = z - zsat
-                    vcses1 = self.b11 * vcste1 + self.b12 * vcste2 + self.b13 * vcste3
-                    vcses2 = self.b21 * vcste1 + self.b22 * vcste2 + self.b23 * vcste3
-                    vcses3 = self.b31 * vcste1 + self.b32 * vcste2 + self.b33 * vcste3
-                    xnorm = np.sqrt(np.power(znorm, 2) - np.power(vcses3, 2))
-                    ynorm = np.sqrt(np.power(xsats1, 2) + np.power(ysats2, 2))
-                    znorm = np.sqrt(np.power(vcste1, 2) + np.power(vcste2, 2) + np.power(vcste3, 2))
-                    x3 = vcses3 / znorm
-                    umv = np.arctan2(x3, np.sqrt(self.rfact - np.power(x3, 2))) - self.roasin
-                    slin = np.sin(umv)
-                    clin = np.cos(umv)
-                    u = self.rotm11 * clin + self.rotm13 * slin
-                    v = self.rotm21 * clin + self.rotm23 * slin
-                    xele = self.picele + np.arcsin((xsats1 * vcses2 - ysats2 * vcses1) / (xnorm * ynorm)) / self.radele
-                    xele = xele + np.arctan2(v, u) / self.radele
-                    xele = xele - self.gamma - self.gamdot * samtim
+        Evaluated at time `time1` (nominal image start time, or first-beta
+        scan time for VAS-era files). Used by get_nadir_sampling() to center
+        the uniform-sampling grid, and a cheap cross-check of the orbital
+        solution.
+        """
+        samtim = self.time1
+        satx, saty, satz = self._satvec(np.asarray(samtim))
+        ct = np.cos(self.emega * samtim + self.xref)
+        st = np.sin(self.emega * samtim + self.xref)
+        x1 = ct * satx + st * saty
+        y1 = -st * satx + ct * saty
+        lat, lon = self._nxyzll(x1, y1, satz)
+        return float(lat), float(-lon)  # East positive
 
-            linele[self.indexLine][point] = xlin
-            linele[self.indexEle][point] = xele
+    def get_nadir_sampling(self):
+        """Return the sub-satellite point, altitude and nadir pixel spacing.
 
-        # Return in 'File' coordinates
-        return self.imageCoordToAreaCoord(linele, linele)
+        The spacing is that of the AREA grid this object was built for.
 
-    def toLinEle2(self, latlon=None):
-
-        ne_e = ne.evaluate
-
-        point = 0
-
-        linele = [[nan] for i in range(len(latlon))]
-
-        xpar = latlon[self.indexLat]
-        # expects positive West Longitude.
-        ypar = latlon[self.indexLon]
-        if self.isEastPositive:
-            ypar = -ypar
-        xlin = 0
-        xele = 0
-
-        # _xpar=ne_e("abs(xpar)")
-        if np.any(abs(xpar) <= 90.):
-            # del _xpar
-            oldlin = 910.
-            orbtim = -99999.
-            xsat = ysat = zsat = 0.0, 0.0, 0.0
-            x = y = z = 0.0, 0.0, 0.0
-            xht = znorm = 0.0, 0.0
-            xyz = self.nllxyz_ne(xpar, ypar)
-
-            x1 = xyz[0]
-            y1 = xyz[1]
-            z = xyz[2]
-            del xyz
-            samtim = self.time2
-
-            if abs(samtim - orbtim) >= 0.0005:
-                xyzsat = self.satvec(samtim)
-                xsat = xyzsat[0]
-                ysat = xyzsat[1]
-                zsat = xyzsat[2]
-                orbtim = samtim  # xht = ne_e("sqrt( ((xsat)**2) +((ysat)**2) + ((zsat)**2))")
-
-            emega = self.emega
-            xref = self.xref
-            ct = ne_e("cos(emega*samtim + xref)")
-            st = ne_e("sin(emega*samtim + xref)")
-            # x = ne_e("ct*x1 - st*y1")
-            # y = ne_e("st*x1 + ct*y1")
-            # vcste1 = ne_e("(ct*x1 - st*y1) - xsat")
-            # vcste2 = ne_e("(st*x1 + ct*y1) - ysat")
-            # vcste3 = ne_e("z - zsat")
-            b31 = self.b31
-            b32 = self.b32
-            b33 = self.b33
-            vcses3 = ne_e("b31*((ct*x1 - st*y1) - xsat) + b32*((st*x1 + ct*y1) - ysat) + b33*(z - zsat)")
-            znorm = ne_e("sqrt( (((ct*x1 - st*y1) - xsat)**2) + (((st*x1 + ct*y1) - ysat)**2) + ((z - zsat)**2))")
-            # x3 = ne_e("vcses3/znorm")
-
-            rfact = self.rfact
-            roasin = self.roasin
-            piclin = self.piclin
-            radlin = self.radlin
-            scan1 = self.scan1
-            scan2 = self.scan2
-            numsen = self.numsen
-            # umv = ne_e("arctan2((vcses3/znorm),sqrt(rfact - ((vcses3/znorm)**2))) - roasin")
-            xlin = ne_e("piclin - (arctan2((vcses3/znorm),sqrt(rfact - ((vcses3/znorm)**2))) - roasin)/radlin")
-            # xlin = ne_e("piclin - umv/radlin")
-            # oldlin = xlin
-            del vcses3
-
-            # scnnum = ne_e("((xlin + xlin)/2.0 - 1.0)/numsen")
-            # scnfrc = ne_e("((((xlin + xlin)/2.0 - 1.0)/numsen) - scan1)/(scan2 - scan1)")
-            xlin = ne_e("xlin + (((((xlin + xlin)/2.0 - 1.0)/numsen) - scan1)/(scan2 - scan1))*(xlin - xlin)")
-            time1 = self.time1
-            tmpscl = self.tmpscl
-            scan1 = self.scan1
-            samtim = ne.evaluate("time1 + tmpscl*((((xlin + xlin)/2.0 - 1.0)/numsen) - scan1)")
-            xyzsat = self.satvec(samtim)
-            xsat = xyzsat[0]
-            ysat = xyzsat[1]
-            zsat = xyzsat[2]
-            cosa = ne_e("(ct*x1 - st*y1)*xsat + (st*x1 + ct*y1)*ysat + z*zsat")
-            r = self.r
-            rsq = self.rsq
-            ctst = ne_e("0.0001*r*(sqrt( ((xsat)**2) +((ysat)**2) + ((zsat)**2))) + rsq")
-
-            del xyzsat
-
-            if np.any(cosa >= ctst):
-                del cosa
-                del ctst
-                b11 = self.b11
-                b12 = self.b12
-                b13 = self.b13
-                b21 = self.b21
-                b22 = self.b22
-                b23 = self.b23
-                b31 = self.b31
-                b32 = self.b32
-                b33 = self.b33
-                # xsats1 = ne_e("b11*xsat + b12*ysat + b13*zsat")
-                # ysats2 = ne_e("b21*xsat + b22*ysat + b23*zsat")
-                # ct = ne_e("cos(emega*samtim + xref)")
-                # st = ne_e("sin(emega*samtim + xref)")
-                x = ne_e("(cos(emega*samtim + xref))*x1 - (sin(emega*samtim + xref))*y1")
-                y = ne_e("(sin(emega*samtim + xref))*x1 + (cos(emega*samtim + xref))*y1")
-                # vcste1 = ne_e("x - xsat")
-                # vcste2 = ne_e("y - ysat")
-                # vcste3 = ne_e("z - zsat")
-
-                del x1
-                del y1
-
-                vcses1 = ne_e("b11*(x - xsat) + b12*(y - ysat) + b13*(z - zsat)")
-                vcses2 = ne_e("b21*(x - xsat) + b22*(y - ysat) + b23*(z - zsat)")
-                vcses3 = ne_e("b31*(x - xsat) + b32*(y - ysat) + b33*(z - zsat)")
-
-                xnorm = ne_e("sqrt((znorm**2) - (vcses3**2))")
-                ynorm = ne_e("sqrt(((b11*xsat + b12*ysat + b13*zsat)**2) + ((b21*xsat + b22*ysat + b23*zsat)**2))")
-
-                znorm = ne_e("sqrt( ((x - xsat)**2) + ((y - ysat)**2) + ((z - zsat)**2))")
-                # x3 = vcses3/znorm
-
-                rfact = self.rfact
-                roasin = self.roasin
-                umv = ne_e("arctan2((vcses3/znorm),sqrt(rfact - ((vcses3/znorm)**2))) - roasin")
-                # slin = ne_e("sin(umv)")
-                # clin = ne_e("cos(umv)")
-
-                rotm11 = self.rotm11
-                rotm13 = self.rotm13
-                rotm21 = self.rotm21
-                rotm23 = self.rotm23
-                # u = ne_e("rotm11*cos(umv) + rotm13*sin(umv)")
-                # v = ne_e("rotm21*cos(umv) + rotm23*sin(umv)")
-
-                picele = self.picele
-                radele = self.radele
-                gamma = self.gamma
-                gamdot = self.gamdot
-                xele = ne_e(
-                    "picele + arcsin(((b11*xsat + b12*ysat + b13*zsat)*vcses2 - (b21*xsat + b22*ysat + b23*zsat)*vcses1)/(xnorm*ynorm))/radele")
-                xele = ne_e(
-                    "xele + arctan2((rotm21*cos(umv) + rotm23*sin(umv)),(rotm11*cos(umv) + rotm13*sin(umv)))/radele")
-                xele = ne_e("xele-gamma-gamdot*samtim")
-
-                del xsat
-                del ysat
-                del zsat
-                del znorm
-                del samtim
-                del vcses1
-                del vcses2
-                del vcses3
-                del xnorm
-                del ynorm
-                del umv
-                del z
-
-        linele[self.indexLine][point] = xlin
-        linele[self.indexEle][point] = xele
-
-        del xlin
-        del xele
-        # Return in 'File' coordinates
-        gc.collect()
-
-        return self.imageCoordToAreaCoord(linele, linele)
-
-    def nllxyz(self, xlat=None, xlon=None):
-        '''
-        SUBROUTINE NLLXYZ(XLAT,XLON,X,Y,Z)
-        CONVERT LAT,LON TO EARTH CENTERED X,Y,Z
-        (DALY, 1978)
-        XLAT,XLON ARE IN DEGREES, WITH NORTH AND WEST POSITIVE
-        X,Y,Z ARE GIVEN IN KM. THEY ARE THE COORDINATES IN A RECTANGULAR
-        FRAME WITH ORIGIN AT THE EARTH CENTER, WHOSE POSITIVE
-        X-AXIS PIERCES THE EQUATOR AT LON 0 DEG, WHOSE POSITIVE Y-AXIS
-        PIERCES THE EQUATOR AT LON 90 DEG, AND WHOSE POSITIVE Z-AXIS
-        INTERSECTS THE NORTH POLE.
-        '''
-
-        ylat = self.rdpdg * xlat
-        ylat1 = np.arctan2(self.bsq * np.sin(ylat), self.asq * np.cos(ylat))
-        ylon = -self.rdpdg * xlon
-        snlt = np.sin(ylat1)
-        cslt = np.cos(ylat1)
-        csln = np.cos(ylon)
-        snln = np.sin(ylon)
-        tnlt = np.power((snlt / cslt), 2)
-        r = self.ab * np.sqrt((1.0 + tnlt) / (self.bsq + self.asq * tnlt))
-        x = r * cslt * csln
-        y = r * cslt * snln
-        z = r * snlt
-        return x, y, z
-
-    def nllxyz_ne(self, xlat=None, xlon=None):
-        '''
-        SUBROUTINE NLLXYZ(XLAT,XLON,X,Y,Z)
-        CONVERT LAT,LON TO EARTH CENTERED X,Y,Z
-        (DALY, 1978)
-        XLAT,XLON ARE IN DEGREES, WITH NORTH AND WEST POSITIVE
-        X,Y,Z ARE GIVEN IN KM. THEY ARE THE COORDINATES IN A RECTANGULAR
-        FRAME WITH ORIGIN AT THE EARTH CENTER, WHOSE POSITIVE
-        X-AXIS PIERCES THE EQUATOR AT LON 0 DEG, WHOSE POSITIVE Y-AXIS
-        PIERCES THE EQUATOR AT LON 90 DEG, AND WHOSE POSITIVE Z-AXIS
-        INTERSECTS THE NORTH POLE.
-        '''
-
-        bsq = self.bsq
-        asq = self.asq
-        ab = self.ab
-        rdpdg = self.rdpdg
-        # ylat = self.rdpdg*xlat
-        ylat1 = ne.evaluate("arctan2(bsq*sin(rdpdg*xlat), asq*cos(rdpdg*xlat))")
-        # ylon = -self.rdpdg*xlon
-        snlt = ne.evaluate("sin(arctan2(bsq*sin(rdpdg*xlat), asq*cos(rdpdg*xlat)))")
-        cslt = ne.evaluate("cos(arctan2(bsq*sin(rdpdg*xlat), asq*cos(rdpdg*xlat)))")
-        csln = ne.evaluate("cos(-rdpdg*xlon)")
-        snln = ne.evaluate("sin(-rdpdg*xlon)")
-        tnlt = ne.evaluate("(snlt/cslt)**2")
-        r = ne.evaluate("ab*sqrt((1.0+tnlt)/(bsq+asq*tnlt))")
-        x = ne.evaluate("r*cslt*csln")
-        y = ne.evaluate("r*cslt*snln")
-        z = ne.evaluate("r*snlt")
-        return x, y, z
+        Returns a dict with ``sub_lon`` / ``sub_lat`` (degrees, east/north
+        positive), ``altitude`` (metres above the equatorial radius, at
+        the nominal image time) and ``line_step`` / ``elem_step`` (metres
+        between neighbouring AREA lines / elements at nadir). The steps
+        come from the scan angle per full-resolution line/element
+        (``radlin`` / ``radele``) scaled by the AREA directory's
+        line/element resolution factors.
+        """
+        sub_lat, sub_lon = self.get_subpoint()
+        satx, saty, satz = self._satvec(np.asarray(self.time1))
+        altitude_m = (float(np.sqrt(satx ** 2 + saty ** 2 + satz ** 2)) - _EQUATORIAL_RADIUS_KM) * 1000.0
+        return {
+            "sub_lon": sub_lon,
+            "sub_lat": sub_lat,
+            "altitude": altitude_m,
+            "line_step": altitude_m * self.radlin * self.resLine / self.magLine,
+            "elem_step": altitude_m * self.radele * self.resElement / self.magElement,
+        }
 
     def getSubpoint(self):
+        """Return the satellite nadir ``(lat, lon)`` in degrees (AreaNav naming)."""
+        return self.get_subpoint()
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(np.asarray(linele[self.indexLine], dtype=float),
+                                  np.asarray(linele[self.indexEle], dtype=float))
+        return [lat, lon]
+
+    def _nllxyz(self, lat, lon):
+        """Lat/lon in degrees (north and west positive) to earth-centred x, y, z in km (Daly, 1978)."""
+        ylat1 = np.arctan2(self.bsq * np.sin(self.rdpdg * lat), self.asq * np.cos(self.rdpdg * lat))
+        ylon = -self.rdpdg * lon
+        snlt, cslt = np.sin(ylat1), np.cos(ylat1)
+        tnlt = (snlt / cslt) ** 2
+        r = self.ab * np.sqrt((1.0 + tnlt) / (self.bsq + self.asq * tnlt))
+        return r * cslt * np.cos(ylon), r * cslt * np.sin(ylon), r * snlt
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon (degrees, east and north positive) to ``(line, element)`` file coordinates.
+
+        The line is always returned; the element is NaN where the point
+        is not visible from the satellite, as in the Java original.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=np.float64), np.asarray(lon, dtype=np.float64))
+        valid = np.abs(lat) <= 90.0
+        x1, y1, z = self._nllxyz(np.where(valid, lat, 0.0), -np.where(valid, lon, 0.0))
 
         samtim = self.time1
-        xyzsat = self.satvec(samtim)
+        oldlin = None
+        for i in range(2):
+            xsat, ysat, zsat = self._satvec(samtim)
+            xht = np.sqrt(xsat ** 2 + ysat ** 2 + zsat ** 2)
+            ct, st = np.cos(self.emega * samtim + self.xref), np.sin(self.emega * samtim + self.xref)
+            x = ct * x1 - st * y1
+            y = st * x1 + ct * y1
+            vcste1, vcste2, vcste3 = x - xsat, y - ysat, z - zsat
+            vcses3 = self.b31 * vcste1 + self.b32 * vcste2 + self.b33 * vcste3
+            znorm = np.sqrt(vcste1 ** 2 + vcste2 ** 2 + vcste3 ** 2)
+            x3 = vcses3 / znorm
+            umv = np.arctan2(x3, np.sqrt(self.rfact - x3 ** 2)) - self.roasin
+            xlin = self.piclin - umv / self.radlin
+            if i == 0:
+                samtim = self.time2
+                oldlin = xlin
 
-        ct = math.cos(self.emega * samtim + self.xref)
-        st = math.sin(self.emega * samtim + self.xref)
-        x = xyzsat[0]
-        y = xyzsat[1]
-        z = xyzsat[2]
-        x1 = ct * x + st * y
-        y1 = -st * x + ct * y
+        scnnum = ((oldlin + xlin) / 2.0 - 1.0) / self.numsen
+        scnfrc = (scnnum - self.scan1) / (self.scan2 - self.scan1)
+        xlin = oldlin + scnfrc * (xlin - oldlin)
+        samtim = self.time1 + self.tmpscl * (scnnum - self.scan1)
+        xsat, ysat, zsat = self._satvec(samtim)
+        cosa = x * xsat + y * ysat + z * zsat
+        ctst = 0.0001 * self.r * xht + self.rsq
 
-        ll = self.nxyzll(x1, y1, z)
+        xsats1 = self.b11 * xsat + self.b12 * ysat + self.b13 * zsat
+        ysats2 = self.b21 * xsat + self.b22 * ysat + self.b23 * zsat
+        ct, st = np.cos(self.emega * samtim + self.xref), np.sin(self.emega * samtim + self.xref)
+        x = ct * x1 - st * y1
+        y = st * x1 + ct * y1
+        vcste1, vcste2, vcste3 = x - xsat, y - ysat, z - zsat
+        vcses1 = self.b11 * vcste1 + self.b12 * vcste2 + self.b13 * vcste3
+        vcses2 = self.b21 * vcste1 + self.b22 * vcste2 + self.b23 * vcste3
+        vcses3 = self.b31 * vcste1 + self.b32 * vcste2 + self.b33 * vcste3
+        xnorm = np.sqrt(vcste1 ** 2 + vcste2 ** 2 + vcste3 ** 2 - vcses3 ** 2)
+        ynorm = np.sqrt(xsats1 ** 2 + ysats2 ** 2)
+        znorm = np.sqrt(vcste1 ** 2 + vcste2 ** 2 + vcste3 ** 2)
+        x3 = vcses3 / znorm
+        umv = np.arctan2(x3, np.sqrt(self.rfact - x3 ** 2)) - self.roasin
+        u = self.rotm11 * np.cos(umv) + self.rotm13 * np.sin(umv)
+        v = self.rotm21 * np.cos(umv) + self.rotm23 * np.sin(umv)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            xele = self.picele + np.arcsin((xsats1 * vcses2 - ysats2 * vcses1) / (xnorm * ynorm)) / self.radele
+        xele = xele + np.arctan2(v, u) / self.radele - self.gamma - self.gamdot * samtim
 
-        ssp_lat = ll[0]
-        ssp_lon = ll[1]
-        if self.isEastPositive:
-            ssp_lon = -ssp_lon
+        xlin = np.where(valid, xlin, np.nan)
+        xele = np.where(valid & (cosa >= ctst), xele, np.nan)
+        return self._image_to_area(xlin, xele)
 
-        return ssp_lat, ssp_lon
-
-    def epoch(self):
-        """
-        Epoch does time computations. Totally unintuitive I choose to implement it as instance method in spite of the
-        fact it does change some class attributes.
-        This is because this code is ported form java where it was ported from Fortran which really sucks
-        :return:
-        """
-        # print self.ietimy
-        # print self.ietimh
-        # print self.semima
-        # print self.oeccen
-        # print self.xmeana
-        PI = math.pi
-        RDPDG = PI / 180.
-        RE = 6378.388
-        GRACON = 0.07436574
-        axmmc = GRACON * ((RE / self.semima) ** .5) ** 3
-        xmanom = RDPDG * self.xmeana
-        time = (xmanom - self.oeccen * math.sin(xmanom)) / (60. * axmmc)
-        time1 = utils.mcPI2F(self.ietimh)
-        time = time1 - time
-
-        iday = 0
-        if time > 48:
-            time = - 48
-            iday = 2
-        elif time > 24:
-            time -= 24
-            iday = 1
-        elif time < -24:
-            time += 48
-            iday = -2
-        elif time < 0:
-
-            time += 24
-            iday = -1
-        self.ietimh = utils.mcF2PI(time)
-        if iday != 0:
-            jyear = (self.ietimy / 1000) % 100
-
-            jyear += 1000
-
-            jday = self.ietimy % 1000
-
-            jday += iday
-            if jday < 1:
-                jyear -= 1
-                jday = utils.leapyear(jyear) + jday
-            else:
-                jtot = utils.leapyear(jyear)
-
-                if jday > jtot:
-                    jyear += 1
-                    jday += jtot
-
-            jyear = jyear % 100
-            self.ietimy = 1000 * jyear + jday
-
-    def icon1(self, yymmdd=None):
-        """
-
-        :param yymmdd:
-        :return:
-        """
-        num = 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
-        year = (yymmdd / 10000) % 100
-        month = (yymmdd / 100) % 100
-        day = yymmdd % 100;
-        if (month < 0 or month > 12):
-            month = 1
-        julday = day + num[month - 1]
-        if year % 4 == 0 and month > 2:
-            julday = julday + 1
-        return 1000 * year + julday
-
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` file coordinates."""
+        line, elem = self.to_lin_ele(np.asarray(latlon[self.indexLat], dtype=float),
+                                     np.asarray(latlon[self.indexLon], dtype=float))
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
 
 
 class RECTNav(AreaNav):

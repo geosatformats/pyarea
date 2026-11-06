@@ -3,6 +3,6 @@
 Requires ``numba`` (``pip install pyarea[pregvar]``).
 """
 from pyarea.pregvar.area_file import PregvarAreaFile
-from pyarea.pregvar.navigation import GOESNav
+from pyarea.nav import GOESNav
 
 __all__ = ["GOESNav", "PregvarAreaFile"]

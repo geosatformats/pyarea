@@ -11,7 +11,7 @@ import logging
 
 import numpy as np
 
-from pyarea.pregvar.navigation import GOESNav
+from pyarea.nav import AreaNav
 
 logger = logging.getLogger(__name__)
 
@@ -673,7 +673,12 @@ class PregvarAreaFile:
                 f"{self.path}: no GOES-type nav block available for "
                 f"earth location (nav_type={self.nav and self.nav['nav_type']!r})"
             )
-        return GOESNav(self._nav_words, self.dir, endian=self._endian)
+        nav = AreaNav(navblock=tuple(int(w) for w in self._nav_words), byte_order=self._endian, int_format="i")
+        nav.setImageStart(self.dir["ul_line"], self.dir["ul_element"])
+        nav.setRes(self.dir["line_res"], self.dir["elem_res"])
+        nav.setStart(0, 0)
+        nav.setMag(1, 1)
+        return nav
 
     def get_nadir_sampling(self):
         """Return the sub-satellite point, altitude and nadir line/element spacing.
