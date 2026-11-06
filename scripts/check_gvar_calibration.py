@@ -1,6 +1,7 @@
 """Calibrate a single-band GVAR AREA file and print values to compare with McIDAS-V.
 
     python scripts/check_gvar_calibration.py FILE.area [LINE ELEM] [LINE ELEM] ...
+    python scripts/check_gvar_calibration.py FILE.area --latlon LAT LON [LAT LON] ...   (east longitude positive)
 
 LINE and ELEM are 0-based indices into the array (row, column); McIDAS-V shows image coordinates, so convert
 with  row = (image_line - directory line_ul) / line_res  (and the same for columns) or just pick pixels by index
@@ -19,7 +20,19 @@ def main(argv):
     d = area.directory
     print(f"sensor {d.sensor_source_number} ({d.sensor_name}), source type {area.source_type}, "
           f"bands {d.bands}, {area.lines} lines x {area.elements} elements, byte order {d.byte_order!r}")
-    pixels = [(int(a), int(b)) for a, b in zip(argv[1::2], argv[2::2])]
+    rest = argv[1:]
+    pixels = []
+    if rest and rest[0] == "--latlon":
+        nums = [float(x) for x in rest[1:]]
+        for lat, lon in zip(nums[0::2], nums[1::2]):
+            elem, line = area.navigation.toLinEle([[lat], [lon]])  # image coordinates, [[elements], [lines]]
+            row = (float(line[0]) - d.line_ul) / d.line_res
+            col = (float(elem[0]) - d.element_ul) / d.element_res
+            print(f"lat {lat} lon {lon} -> image line {float(line[0]):.1f} elem {float(elem[0]):.1f} "
+                  f"-> row {row:.1f} col {col:.1f}")
+            pixels.append((int(round(row)), int(round(col))))
+    else:
+        pixels = [(int(a), int(b)) for a, b in zip(rest[0::2], rest[1::2])]
     if not pixels:
         pixels = [(area.lines // 2, area.elements // 2)]
     raw = area.read_data()
