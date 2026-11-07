@@ -213,3 +213,29 @@ def test_navs_of_different_files_do_not_share_state():
     assert second.elvmax is not first.elvmax and second.scnmax is not first.scnmax
     assert np.isnan(GVARNav.bt).all()  # the class level defaults were never filled in
     assert GVARNav.elvmax == [0.220896, 0.22089375]
+
+
+def test_area_nav_codes_are_the_words_of_visads_area_nav():
+    """The code constants are the four characters of the first nav word, as in AREAnav.java."""
+    java = {"DMSP": 0x444D5250, "GMSX": 0x474D5358, "GOES": 0x474F4553, "GEOS": 0x47454F53, "GVAR": 0x47564152,
+            "MOLL": 0x4D4F4C4C, "MSAT": 0x4D534154, "MSGT": 0x4D534754, "MSG": 0x4D534720, "POES": 0x5449524F,
+            "RADR": 0x52414452, "RECT": 0x52454354, "PS": 0x50532020, "MERC": 0x4D455243, "TANC": 0x54414E43,
+            "SIN": 0x53494E20, "LAMB": 0x4C414D42, "LALO": 0x4C414C4F, "KALP": 0x4B414C50, "ABIS": 0x41424953,
+            "ABIN": 1094863182}
+    for name, word in java.items():
+        assert getattr(AreaNav, name) == word.to_bytes(4, "big").decode("ascii"), name
+
+
+def test_flipped_line_coordinates_api():
+    nav = make_nav(load("goes8_gvar_nav.json"))
+    assert nav.isFlippedLineCoordinates() is False
+    nav.setFlipLineCoordinates(10000)
+    assert nav.isFlippedLineCoordinates() is True and nav.getLineOffset() == 10000.0
+    line, elem = nav._image_to_area(np.array([2900.0]), np.array([9100.0]))
+    base = make_nav(load("goes8_gvar_nav.json"))._image_to_area(np.array([2900.0]), np.array([9100.0]))
+    assert line[0] == pytest.approx(10000.0 - base[0][0]) and elem[0] == base[1][0]
+
+
+def test_navigations_without_a_subpoint_report_nan():
+    lat, lon = AreaNav.getSubpoint(make_nav(load("goes8_gvar_nav.json")))
+    assert np.isnan(lat) and np.isnan(lon)

@@ -18,8 +18,10 @@ logger = logging.getLogger('nav')
 class AreaNav():
 
 
+    # The codes below are the four characters of the first nav word, as in VisAD's AREAnav (the short ones are padded)
+
     # Code value in AREA files used to designate DMSP navigation
-    DMSP = 'DSMP'
+    DMSP = 'DMRP'
 
     # Code value in AREA files used to designate GMSX (GMS) navigation
     GMSX = 'GMSX'
@@ -43,10 +45,10 @@ class AreaNav():
     MSGT = 'MSGT'
 
     # Code value in AREA files used to designate MSG navigation
-    MSG  = 'MSG'
+    MSG  = 'MSG '
 
-    # Code value in AREA files used to designate POES navigation
-    POES =  'POES'
+    # Code value in AREA files used to designate POES (TIROS) navigation
+    POES =  'TIRO'
 
     # Code value in AREA files used to designate RADR (radar) navigation
     RADR = 'RADR'
@@ -55,7 +57,7 @@ class AreaNav():
     RECT =  'RECT'
 
     # Code value in AREA files used to designate PS (polar stereographic) navigation
-    PS = 'PS'
+    PS = 'PS  '
 
     # Code value in AREA files used to designate MERC (mercator) navigation
     MERC = 'MERC'
@@ -64,7 +66,7 @@ class AreaNav():
     TANC =  'TANC'
 
     # Code value in AREA files used to designate SIN (sinusoidal cone) navigation
-    SIN =  'SIN'
+    SIN =  'SIN '
 
     # Code value in AREA files used to designate LAMB (lambert conformal)navigation
     LAMB = 'LAMB'
@@ -149,7 +151,7 @@ class AreaNav():
 
         # dynamically create the new class
         for klass in nav_classes:
-            if cls is not AreaNav or klass.__name__.startswith(navtype):
+            if cls is not AreaNav or klass.__name__.startswith(navtype.strip()):
                 inst = object.__new__(klass)
                 inst.navtype = navtype
                 inst.byte_order = byte_order
@@ -222,6 +224,21 @@ class AreaNav():
 
     def canApproximateWithSpline(self):
         return True
+
+    def setFlipLineCoordinates(self, line):
+        """Treat the lines as counted from the bottom: ``line`` is the offset, as AREAnav.setFlipLineCoordinates."""
+        self.isLineFlipped = True
+        self.lineOffset = float(line)
+
+    def isFlippedLineCoordinates(self):
+        return self.isLineFlipped
+
+    def getLineOffset(self):
+        return float(self.lineOffset)
+
+    def getSubpoint(self):
+        """``(lat, lon)`` of the subpoint, NaN for navigations that have none, as AREAnav.getSubpoint."""
+        return nan, nan
 
     def __str__(self):
         return self.navtype
