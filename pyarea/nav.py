@@ -1057,7 +1057,8 @@ class LALONav(AreaNav):
         pass
 
 
-GOES_MAGIC = b"GOES"
+# the nav block of a "GOES" file starts with the 4 ASCII bytes of the nav type code AreaNav already defines
+GOES_MAGIC = AreaNav.GOES.encode("ascii")
 
 _RDPDG = np.pi / 180.0
 _MCMISSING = -2139062144  # McIDAS "missing" (0x80808080 as signed int32), used for iarr[28]/skew

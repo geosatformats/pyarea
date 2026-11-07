@@ -14,12 +14,20 @@ from tests.fake_area_files import IR_WINDOW, FakeArea, mode_a_data, write_area_f
         (16, "SMS-1", "visible", "VIS"),
         (17, "SMS-1", "infrared", "IR"),
         (27, "GOES-4", "infrared and water vapor (VAS)", "IR"),
-        (32, "GOES-7", "visible, Block 1 supplemental data", "VIS"),
+        (32, "GOES-7", "visible, Block 1 Auxiliary Data", "VIS"),
         (33, "GOES-7", "infrared", "IR"),
         (6, "PDUS Meteosat", "water vapor", "IR"),
         (12, "GMS", "visible", "VIS"),
         (70, "GOES-8", "imager", None),
-        (187, "GOES-16", "sounder", None),
+        (186, "GOES-16", "imager", None),
+        (187, "GOES-16", "Level 2 Products", None),
+        (190, "GOES-18", "imager", None),
+        (192, "GOES-19", "imager", None),
+        (174, "EWS-G1", "imager", None),
+        (179, "EWS-G3", "sounder", None),
+        (221, "GMS-1", None, None),
+        (287, "Himawari-9", None, None),
+        (365, "MTG-S1", "sounder", None),
         (65, "NOAA-15", None, None),
         (86, "Himawari-8", None, None),
         (104, "TERRA-AER", None, None),
@@ -70,3 +78,12 @@ def test_sensors_tuple_is_indexed_by_number():
     assert names[24] == "GOES-3 visible"
     assert names[1] == "Test Patterns"
     assert names[59] == ""
+
+
+def test_table_matches_the_mcidas_users_guide():
+    """Spot checks against Appendix C ("Sensor Source Numbers") of the McIDAS Users Guide."""
+    expected = {51: "Meteosat-8 (MSG-1)", 80: "ERBE", 108: "TERRA GUS", 188: "GOES 17 imager", 222: "GMS-2",
+                223: "GMS-3", 304: "NOAA-23 (JPSS-4)", 357: "Meteosat-14 (MTG-I3)"}
+    for number, name in expected.items():
+        assert SENSOR_NAMES[number] == name
+    assert len(SENSOR_NAMES) >= 196
