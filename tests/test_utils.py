@@ -47,11 +47,37 @@ def test_bcd_words_accept_signed_words_and_milliseconds():
     assert bcd_words_to_datetime(0x19962562, 0x14515123) == BCD_TIME.replace(microsecond=123000)
 
 
-def test_nav_bcd2datetime_matches_for_a_little_endian_navigation_block():
-    """AreaNav.bcd2datetime takes words as they were read from the file, so the file's byte order does not matter."""
-    from tests.test_gvar_nav import load, make_nav
+def _visad_epoch_minutes(e0, e1):
+    """Port of the BCD loop in VisAD's GVARnav.java (integer division as in Java): minutes since 1950-01-01."""
+    t0 = t1 = 0
+    power10 = 1
+    for _ in range(8):
+        t0 += (e0 & 0xF) * power10
+        t1 += (e1 & 0xF) * power10
+        e0 >>= 4
+        e1 >>= 4
+        power10 *= 10
+    year = t0 // 10000
+    day = int((t0 - year * 10000) * 0.1)
+    iab = (t0 - year * 10000 - day * 10) * 10
+    nbc = t1 // 10000000
+    iac = t1 - nbc * 10000000
+    hour = iab + nbc
+    minutes = int(iac * 0.00001)
+    seconds = (t1 - ((t1 - iac) + minutes * 100000)) * 0.001
+    j = day + 1461 * (year + 4799) // 4 - 3 * ((year + 4899) // 100) // 4 - 2465022
+    return j * 1440.0 + hour * 60.0 + minutes + seconds / 60.0
 
-    nav = make_nav(load("goes8_gvar_nav.json"))
-    assert nav.byte_order == "<"
-    assert nav.bcd2datetime(*BCD_WORDS) == BCD_TIME
-    assert nav.flywheel is False
+
+def test_bcd_decoder_agrees_with_visad_gvarnav():
+    rng = np.random.default_rng(1)
+    start = datetime.datetime(1975, 1, 1)
+    for offset in rng.integers(0, 45 * 365 * 86400, 2000):
+        t = start + datetime.timedelta(seconds=int(offset), milliseconds=int(rng.integers(0, 1000)))
+        digits1 = f"{t.year:04d}{t.timetuple().tm_yday:03d}{t.hour // 10}"
+        digits2 = f"{t.hour % 10}{t.minute:02d}{t.second:02d}{t.microsecond // 1000:03d}"
+        w1, w2 = int(digits1, 16), int(digits2, 16)
+        decoded = bcd_words_to_datetime(w1, w2)
+        assert decoded == t
+        minutes = (decoded - datetime.datetime(1950, 1, 1)).total_seconds() / 60.0
+        assert abs(_visad_epoch_minutes(w1, w2) - minutes) < 1e-6

@@ -591,8 +591,6 @@ class GVARNav(AreaNav):
 
 
         self.itype = 1
-        #is this used somewhere???
-        self.flywheel = None
         #convert to float, no Gould bullshit like in C, just int to float, same order of course
 
         for i in range(self.MXCDSZ):
@@ -675,41 +673,12 @@ class GVARNav(AreaNav):
         diff = imgtime - jan_1_1950
         imgtim1 = diff.total_seconds()/60.
         '''
-        bcdtime = self.bcd2datetime(navblock[self.ETIME], navblock[self.ETIME+1])
+        bcdtime = utils.bcd_words_to_datetime(navblock[self.ETIME], navblock[self.ETIME+1])
 
 
 
         diff1 = bcdtime - jan_1_1950
         epoch1 = diff1.total_seconds()/60.
-        '''
-        # convert the BCD to binary integer
-        #heer the my code and java is identical so i use mine
-        #gain this is a port from java, but because the results are identical to my own code
-        t0 = 0
-        t1 = 0
-        power10 = 1
-        e0 = navblock[self.ETIME]
-        e1 = navblock[self.ETIME + 1]
-        for i in range(8):
-            t0 = t0 + ( e0 & int('0xf', 16) ) * power10
-            t1 = t1 + ( e1 & int('0xf', 16) ) * power10
-            e0 = e0 >>  4
-            e1 = e1 >>  4
-            power10 = power10 * 10
-        year = t0 / 10000
-        day = int((t0 - (year * 10000)) * 0.1)
-        iaa = t0 - (year * 10000)
-        iab = (iaa - (day * 10)) * 10
-        nbc = t1 / 10000000
-        iac = t1 - (nbc * 10000000)
-        def1 = t1 - iac
-        hour = iab + nbc
-        minuts = int(iac * 0.00001)
-        s = (t1 - (def1 + (minuts * 100000))) * 0.001;
-        j = day + 1461 * (year + 4799) / 4 - 3 * ((year + 4899) / 100) / 4 - 2465022
-        epoch = float(j * 1440. + hour * 60. + float(minuts) + (s / 60.))
-        print epoch, epoch1
-        '''
 
 
         self.imc = 0 if ( (navblock[self.IMCACT] & (1 << self.IMCFLG)) != 0 ) else  1
@@ -859,19 +828,6 @@ class GVARNav(AreaNav):
         #this needs to be fixed, those params are passed for no reason as they are instance
         self.inst2e(self.roll, self.pitch, self.yaw, b, self.bt)
 
-
-
-
-    def bcd2datetime(self, w1, w2):
-        """Convert two 32-bit words holding a BCD time (already decoded in the file's byte order) to a datetime.
-
-        Also sets ``self.flywheel`` from the flag bit the time code carries.
-        """
-        chars = struct.pack('>2I', w1 & 0xFFFFFFFF, w2 & 0xFFFFFFFF)
-        for val in (chars[3] >> 4, chars[3] & 15):
-            # the most significant bit of the first nibble day_100 is the flywheel. GOD knows what that means
-            self.flywheel = True if (val & 1) else False
-        return utils.bcd_words_to_datetime(w1, w2)
 
 
     def gatt(self, k, floatblock, intblock, wa, te):
