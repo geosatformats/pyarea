@@ -245,6 +245,20 @@ class AreaNav():
         self.magLine = magLine
         self.magElement = magElement
 
+    def _area_to_image(self, line, elem):
+        """AREA (file) coordinates to GVAR image coordinates."""
+        if self.isLineFlipped:
+            line = self.lineOffset - line
+        return (self.startImageLine + self.resLine * (line - self.startLine) / self.magLine,
+                self.startImageElement + self.resElement * (elem - self.startElement) / self.magElement)
+
+    def _image_to_area(self, line, elem):
+        """GVAR image coordinates to AREA (file) coordinates."""
+        line = self.startLine + self.magLine * (line - self.startImageLine) / self.resLine
+        if self.isLineFlipped:
+            line = self.lineOffset - line
+        return line, self.startElement + self.magElement * (elem - self.startImageElement) / self.resElement
+
     @classmethod
     def get_subclasses(cls):
 
@@ -990,20 +1004,6 @@ class GVARNav(AreaNav):
             aebe2c=float(self.aebe2c), aebe3c=float(self.aebe3c), aebe4c=float(self.aebe4c),
             q3=float(self.q3), east=1.0 if self.isEastPositive else -1.0,
         )
-
-    def _area_to_image(self, line, elem):
-        """AREA (file) coordinates to GVAR image coordinates."""
-        if self.isLineFlipped:
-            line = self.lineOffset - line
-        return (self.startImageLine + self.resLine * (line - self.startLine) / self.magLine,
-                self.startImageElement + self.resElement * (elem - self.startElement) / self.magElement)
-
-    def _image_to_area(self, line, elem):
-        """GVAR image coordinates to AREA (file) coordinates."""
-        line = self.startLine + self.magLine * (line - self.startImageLine) / self.resLine
-        if self.isLineFlipped:
-            line = self.lineOffset - line
-        return line, self.startElement + self.magElement * (elem - self.startImageElement) / self.resElement
 
     def to_latlon(self, line, elem):
         """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
@@ -1764,135 +1764,102 @@ class GOESNav(AreaNav):
 
 
 class RECTNav(AreaNav):
-    labels =  { 	1:'test',
-                    2: 'a particular image row number',
-                    3: 'latitude corresponding to word 2, degrees x10000',
-                    4: 'a particular image column number',
-                    5: 'longitude corresponding to word 4, degrees x10000',
-                    6:'latitude degrees/image line, degrees x10000',
-                    7:'longitude degrees/image line, degrees x10000',
-                    8:'radius of the planet, meters',
-                    9:'eccentricity of the planet, x1000000',
-                    10:'coordinate type, >= 0 planetodetic, < 0 planetocentric',
-                    11:'longitude convention, >= 0 west positive, < 0 west negative'
-                }
+    """Navigation for rectangular (equirectangular, "plate carree") latitude/longitude AREA files, nav type RECT.
+
+    Port of ``edu.wisc.ssec.mcidas.RECTnav``. Image line and element are linear in latitude and longitude.
+    """
+
+    labels = {1: 'test',
+              2: 'a particular image row number',
+              3: 'latitude corresponding to word 2, degrees x10000',
+              4: 'a particular image column number',
+              5: 'longitude corresponding to word 4, degrees x10000',
+              6: 'latitude degrees/image line, degrees x10000',
+              7: 'longitude degrees/image line, degrees x10000',
+              8: 'radius of the planet, meters',
+              9: 'eccentricity of the planet, x1000000',
+              10: 'coordinate type, >= 0 planetodetic, < 0 planetocentric',
+              11: 'longitude convention, >= 0 west positive, < 0 west negative'
+              }
 
     def __init__(self, navblock=None, auxblock=None, **kwargs):
         inavblock = navblock
-        #for n, v in self.labels.items():
-        #	print n, v, inavblock[n-1]
         self.itype = 2
         self.iwest = 1 if inavblock[10] >= 0 else -1
 
         self.xrow = inavblock[1]
         self.xcol = inavblock[3]
-        ipowlat = inavblock[11]
-        if ipowlat == 0:
-            ipowlat = 4
-        self.zslat = inavblock[2] / (10. ** ipowlat)
-        ipowlon = inavblock[12]
-        if ipowlon == 0:
-            ipowlon == 4
-        self.zslon = inavblock[4] / (10. ** ipowlon)
-
-        ipowdlin = inavblock[13]
-        if ipowdlin == 0:
-            ipowdlin == 4
-        self.zdlat = float(inavblock[5]) / (10. ** ipowdlin)
-        ipowdele = inavblock[14]
-        if ipowdele == 0:
-            ipowdele == 4
-        self.zdlon = float(inavblock[6]) / (10 ** ipowdele)
+        # words 12 to 15 are the powers of ten the values above are scaled by; 0 means the default, 4
+        self.zslat = inavblock[2] / 10. ** (inavblock[11] or 4)
+        self.zslon = inavblock[4] / 10. ** (inavblock[12] or 4)
+        self.zdlat = float(inavblock[5]) / 10. ** (inavblock[13] or 4)
+        self.zdlon = float(inavblock[6]) / 10. ** (inavblock[14] or 4)
         if self.xcol == 1:
             self.zslon = self.zslon - 180.0 * self.iwest
 
+    def to_latlon(self, line, elem, lon_circular=True):
+        """Convert line/element (file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        NaN where the latitude is outside +-90, or the longitude is more than 180 degrees from the reference
+        longitude. With ``lon_circular`` longitudes are wrapped into -180 to 180.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        xldif = self.xrow - image_line
+        if self.xcol == 1:
+            xlon = self.zslon + 180 * self.iwest - self.iwest * (image_elem - self.xcol) * self.zdlon
+        else:
+            xlon = self.zslon + self.iwest * (self.xcol - image_elem) * self.zdlon
+        xlat = self.zslat + xldif * self.zdlat
+        with np.errstate(invalid="ignore"):
+            xlat = np.where(np.abs(xlat) > 90, np.nan, xlat)
+            xlon = np.where((xlon > self.zslon + 180) | (xlon < self.zslon - 180), np.nan, xlon)
+            if lon_circular:
+                xlon = np.where(xlon < -180, xlon + 360, xlon)
+                xlon = np.where(xlon > 180, xlon - 360, xlon)
+        invalid = np.isnan(xlat) | np.isnan(xlon)
+        lat = np.where(invalid, np.nan, xlat)
+        lon = np.where(invalid, np.nan, -xlon if self.iwest == 1 else xlon)
+        return lat, lon
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (any shape, broadcast together) to ``(line, element)`` in file coordinates."""
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        xlon = -lon if self.iwest == 1 else lon
+        with np.errstate(invalid="ignore"):
+            xlon = np.where(xlon > self.zslon + 180, xlon - 360, np.where(xlon < self.zslon - 180, xlon + 360, xlon))
+        xlin = self.xrow - (lat - self.zslat) / self.zdlat
+        if self.xcol == 1:
+            xele = self.xcol - (xlon - self.zslon - 180 * self.iwest) / (self.zdlon * self.iwest)
+        else:
+            xele = self.xcol - (xlon - self.zslon) / (self.zdlon * self.iwest)
+        return self._image_to_area(xlin, xele)
+
+    def toLatLon(self, linele=None, lon_circular=True):
+        """Convert ``[[elements], [lines]]`` (file coordinates) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle], lon_circular)
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
     def toLinEle(self, latlon=None):
-
-        number = len(latlon[0])
-        linele = [[nan for i in range(number)], [nan for i in range(number)]]
-        for point in range(number):
-            xlat = latlon[self.indexLat][point]
-            xlon = -latlon[self.indexLon][point] if self.iwest == 1 else latlon[self.indexLon][point]
-
-            if xlon > (self.zslon+180):
-                xlon = xlon - 360
-            elif xlon < (self.zslon-180):
-                xlon = xlon + 360
-
-            xlin = self.xrow - (xlat - self.zslat)/self.zdlat
-            if self.xcol == 1:
-                xele = self.xcol - (xlon - self.zslon-180*self.iwest) / (self.zdlon*self.iwest)
-            else:
-                xele = self.xcol - (xlon - self.zslon)/(self.zdlon*self.iwest)
-            linele[self.indexLine][point] = float(xlin)
-            linele[self.indexEle][point] = float(xele)
-        #return linele
-
-        return self.imageCoordToAreaCoord(linele=linele)
-
-    def toLatLon(self, linele=None, lon_circular=True ):
-
-        number = len(linele[0])
-        latlon = [[nan for i in range(number)], [nan for i in range(number)]]
-
-
-        # Convert array to Image coordinatesfor computations
-
-        imglinele = self.areaCoordtoImageCoord(linele=linele)
-
-        for point in range(number):
-            xlin = imglinele[self.indexLine][point]
-            xele = imglinele[self.indexEle][point]
-
-            xldif = self.xrow - xlin
-            if self.xcol == 1:
-                xedif = self.iwest * (xele-self.xcol)
-                xlon = self.zslon + 180 * self.iwest - xedif*self.zdlon
-            else:
-                xedif = self.iwest * (self.xcol - xele)
-                xlon = self.zslon + xedif * self.zdlon
-
-            xlat = self.zslat + xldif * self.zdlat
-            if  xlat > 90 or xlat < -90:
-                xlat = nan
-
-            if xlon > (self.zslon + 180) or xlon <  (self.zslon -180):
-                xlon = nan
-            if not math.isnan(xlon):
-                if lon_circular:
-                    if xlon < -180:
-                        xlon = xlon + 360
-                    if xlon > 180:
-                        xlon = xlon - 360
-
-            if math.isnan(xlon) or math.isnan(xlat):
-                latlon[self.indexLat][point] = nan
-                latlon[self.indexLon][point] = nan
-            else:
-                latlon[self.indexLat][point] = float(xlat)
-                latlon[self.indexLon][point] = -xlon if self.iwest == 1 else xlon
-
-        return latlon
-
-
-
-
-
-
-
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
 
     def __str__(self):
         s = ''
-        s+= 'itype %i \n' % self.itype
-        s+= 'xrow %i \n' % self.xrow
-        s+= 'xcol %i \n' % self.xcol
-        s+= 'iwest %i \n' % self.iwest
-        s+= 'zslat %.6f \n' % self.zslat
-        s+= 'zslon %.6f \n' % self.zslon
-        s+= 'zdlat %.6f \n' % self.zdlat
-        s+= 'zdlon %.6f \n' % self.zdlon
+        s += 'itype %i \n' % self.itype
+        s += 'xrow %i \n' % self.xrow
+        s += 'xcol %i \n' % self.xcol
+        s += 'iwest %i \n' % self.iwest
+        s += 'zslat %.6f \n' % self.zslat
+        s += 'zslon %.6f \n' % self.zslon
+        s += 'zdlat %.6f \n' % self.zdlat
+        s += 'zdlon %.6f \n' % self.zdlon
         return s
-
 
 
 class GMSXNav(AreaNav):
