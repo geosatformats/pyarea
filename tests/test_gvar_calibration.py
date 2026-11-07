@@ -108,7 +108,7 @@ def test_raw_and_precalibrated_pass_through():
 
 def test_unknown_satellite_and_short_block():
     with pytest.raises(NotImplementedError):
-        GVARCalibrator(78, imager_block(78)[0]).calibrate_array(np.array([100.0]), 2, Calibrator.CAL_TEMP)
+        GVARCalibrator(186, imager_block(186)[0]).calibrate_array(np.array([100.0]), 2, Calibrator.CAL_TEMP)
     with pytest.raises(ValueError, match="needed"):
         GVARCalibrator(70, [0] * 10)
 
@@ -152,3 +152,39 @@ def test_read_calibrated_from_file(tmp_path):
     assert rad.shape == SHAPE
     np.testing.assert_allclose(rad, (4000 / 32 - biases[2]) / gains[2], rtol=1e-4)
     assert np.isfinite(area.read_calibrated("TEMP")).all()
+
+
+@pytest.mark.parametrize("satellite", range(8, 16))
+def test_planck_tables_are_complete_and_sane(satellite):
+    for instrument, size in (("imager", 5), ("sounder", 18)):
+        table = GVAR_PLANCK_COEFFS[satellite][instrument]
+        for name in ("FK1", "FK2", "TC1", "TC2"):
+            assert len(table[name]) == size
+        start = 1 if instrument == "imager" else 0  # imager band 1 is the visible
+        for i in range(start, size):
+            assert table["FK1"][i] > 0 and table["FK2"][i] > 0
+            assert 0.9 < table["TC2"][i] <= 1.0
+            assert 0 <= table["TC1"][i] < 6
+        # a 300 K scene in the IR should come out near its brightness temperature
+        if instrument == "imager":
+            for i in (2, 3, 4):  # 6.5, 11 and 12/13 micron
+                fk1, fk2, tc1, tc2 = (table[n][i] for n in ("FK1", "FK2", "TC1", "TC2"))
+                teff = 300.0 * tc2 + tc1
+                radiance = fk1 / (np.exp(fk2 / teff) - 1.0)
+                temp = (fk2 / np.log(fk1 / radiance + 1.0) - tc1) / tc2
+                assert temp == pytest.approx(300.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("sensor, satellite", [(76, 11), (78, 12), (180, 13), (182, 14), (184, 15)])
+def test_sensor_numbers_map_to_satellites_and_calibrate(sensor, satellite):
+    from pyarea.calibration import GVAR_SENSOR_SATELLITES
+
+    assert GVAR_SENSOR_SATELLITES[sensor] == GVAR_SENSOR_SATELLITES[sensor + 1] == satellite
+    cal = GVARCalibrator(sensor, imager_block(sensor)[0])
+    temp = cal.calibrate_array(np.array([4000.0]), 4, Calibrator.CAL_TEMP)
+    assert np.isfinite(temp).all() and 100 < temp[0] < 400
+
+
+def test_goes_16_and_later_are_not_gvar():
+    with pytest.raises(NotImplementedError):
+        GVARCalibrator(186, imager_block(186)[0]).calibrate_array(np.array([4000.0]), 4, Calibrator.CAL_TEMP)
