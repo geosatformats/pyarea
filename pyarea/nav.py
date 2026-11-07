@@ -1011,28 +1011,6 @@ def _icon1(yymmdd):
     return 1000 * year + julday
 
 
-def _mc_daytime_to_secs(yrday, hms):
-    """Convert a YYDDD day and HHMMSS time to seconds since the epoch.
-
-    Matches McIDASUtil.mcDayTimeToSecs closely enough for the *difference*
-    used in timdif() below (which is all this port needs -- it's only ever
-    used as raha's time delta).
-    """
-    year = yrday // 1000
-    year = 1900 + year if year >= 30 else 2000 + year
-    day = yrday % 1000
-    # days since a fixed reference (Jan 1 of `year`), matching Java's
-    # Calendar-based day-of-year approach for the purpose of subtraction
-    dt = datetime.datetime(year, 1, 1) + datetime.timedelta(days=day - 1)
-    seconds = utils.mcPI2F(hms) * 3600.0
-    epoch = datetime.datetime(1970, 1, 1)
-    return (dt - epoch).total_seconds() + seconds
-
-
-def _timdif(yrday1, hms1, yrday2, hms2):
-    return (_mc_daytime_to_secs(yrday2, hms2) - _mc_daytime_to_secs(yrday1, hms1)) / 60.0
-
-
 def _check_magic(iarr, endian):
     expected = int.from_bytes(GOES_MAGIC, "big" if endian == ">" else "little")
     got = int(iarr[0]) & 0xFFFFFFFF
@@ -1389,7 +1367,9 @@ class GOESNav(AreaNav):
 
     def _set_timing(self, iarr):
         """Set the earth-rotation reference, the picture time and the scan line times."""
-        raha = _timdif(74001, 0, self.navday, 0) * 1.00273791 / 4.0 + 100.26467
+        # navday has a two digit year; as in the year counted from 1900 that timdif takes, 00 to 29 mean 2000 to 2029
+        navday = self.navday + 100000 if self.navday // 1000 < 30 else self.navday
+        raha = utils.timdif(74001, 0, navday, 0) * 1.00273791 / 4.0 + 100.26467
         self.xref = (raha % 360.0) * self.rdpdg
         self.pictim = utils.mcPI2F(int(iarr[2]))
         self.gamma = float(iarr[38]) / 100.0

@@ -63,6 +63,16 @@ def yyyddd_hhmmss2datetime(yyyddd, hhmmss ):
     month, day = get_month_day(year, yday, True)
     return datetime.datetime(year, month, day,hour=hh,minute=mm,second=ss)
 
+def timdif(yrday1, hms1, yrday2, hms2):
+    """Minutes from the first date and time to the second, as McIDASUtil.timdif.
+
+    The days are YYDDD or YYYYDDD, counted from 1900 as in a directory (see ``yyyddd_hhmmss2datetime``), the times HHMMSS.
+    """
+    first = yyyddd_hhmmss2datetime(yrday1, hms1)
+    second = yyyddd_hhmmss2datetime(yrday2, hms2)
+    return (second - first).total_seconds() / 60.0
+
+
 def get_month_day(year, day, one_based=False):
         if one_based:  # if Jan 1st is 1 instead of 0
                 day -= 1
