@@ -5,6 +5,7 @@ import numpy as np
 from numpy import nan
 
 from pyarea import utils
+from pyarea.sensors import get_sensor
 
 
 class Calibrator(object):
@@ -17,39 +18,6 @@ class Calibrator(object):
     CAL_TEMP = 4
     CAL_BRIT = 5
     CAL_MAX = 5
-    # FY-2D
-    SENSOR_FY2D = 36
-    # FY-2E
-    SENSOR_FY2E = 37
-    # FY-2F
-    SENSOR_FY2F = 38
-    # FY-2G
-    SENSOR_FY2G = 39
-    # FY-2H
-    SENSOR_FY2H = 40
-    # Meteosat Second Generation imager.
-    SENSOR_MSG_IMGR = 51
-    # GOES 8 imager.
-    SENSOR_GOES8_IMGR = 70
-    # GOES 8 sounder.
-    SENSOR_GOES8_SNDR = 71
-    # GOES 9 imager.
-    SENSOR_GOES9_IMGR = 72
-    # GOES 9 sounder.
-    SENSOR_GOES9_SNDR = 73
-    # GOES 10 imager.
-    SENSOR_GOES10_IMGR = 74
-    # GOES 10 sounder.
-    SENSOR_GOES10_SNDR = 75
-    # GOES 12 imager.
-    SENSOR_GOES12_IMGR = 78
-    # GOES 12 sounder.
-    SENSOR_GOES12_SNDR = 79
-    # GOES 13 imager.
-    SENSOR_GOES13_IMGR = 180
-    # GOES 13 sounder.
-    SENSOR_GOES13_SNDR = 181
-
     def setCalType(self, calType):
         raise Exception( 'Function selCalType is abstract')
 
@@ -301,9 +269,20 @@ GVAR_PLANCK_COEFFS = {
     },
 }
 
-# sensor source number -> GOES satellite number, for the satellites that have constants above
-GVAR_SENSOR_SATELLITES = {70: 8, 71: 8, 72: 9, 73: 9, 74: 10, 75: 10, 76: 11, 77: 11, 78: 12, 79: 12,
-                          180: 13, 181: 13, 182: 14, 183: 14, 184: 15, 185: 15}
+def gvar_sensor(sensor_number):
+    """``(satellite number, "imager" or "sounder")`` of a GVAR sensor source number, e.g. ``(13, "imager")``.
+
+    Taken from :mod:`pyarea.sensors`, so it follows the same sensor table as the directory.
+
+    Raises:
+        ValueError: if the number is not a GOES imager or sounder.
+    """
+    sensor = get_sensor(sensor_number)
+    if (sensor is None or not sensor.platform.startswith("GOES-")
+            or sensor.instrument not in ("imager", "sounder")):
+        raise ValueError(f"Sensor {sensor_number} is not a GOES imager or sounder.")
+    return int(sensor.platform.split("-")[1]), sensor.instrument
+
 
 _UNITS = {"RAW": Calibrator.CAL_RAW, "RAD": Calibrator.CAL_RAD, "ALB": Calibrator.CAL_ALB,
           "TEMP": Calibrator.CAL_TEMP, "BRIT": Calibrator.CAL_BRIT}
@@ -342,7 +321,7 @@ class GVARCalibrator(Calibrator):
     and the first detector's are used for the IR bands.
 
     Args:
-        sensorId: The sensor source number; even numbers are imagers, odd ones sounders.
+        sensorId: The sensor source number; its satellite and instrument come from :mod:`pyarea.sensors`.
         calBlock: The calibration block as 32-bit words, or None for data that is already calibrated.
     """
 
@@ -355,7 +334,8 @@ class GVARCalibrator(Calibrator):
 
     def __init__(self, sensorId=None, calBlock=None):
         self.sid = sensorId
-        self.imager = sensorId % 2 == 0
+        self.satellite, instrument = gvar_sensor(sensorId)
+        self.imager = instrument == "imager"
         self.curCalType = self.CAL_RAW
         self.isPreCalibrated = calBlock is None
         self.scale = 32 if self.imager else 2
@@ -379,8 +359,8 @@ class GVARCalibrator(Calibrator):
         self.visRadToAlb = values[3 * n_vis]
         rest = values[3 * n_vis + 1:]
         if self.imager:
-            # the IR bands are stored rotated by two for satellites before GOES-12 (sensor number 78)
-            ir_offset = 0 if self.sid > 77 else 2
+            # the IR bands are stored rotated by two for satellites before GOES-12
+            ir_offset = 0 if self.satellite >= 12 else 2
             order = [(i + ir_offset) % self.NUM_IR_BANDS for i in range(self.NUM_IR_BANDS)]
             ir = rest[:4 * self.NUM_IR_BANDS].reshape(4, self.NUM_IR_BANDS)
             self.irBiasCoef = np.empty((self.NUM_IR_DETECTORS, self.NUM_IR_BANDS))
@@ -407,10 +387,9 @@ class GVARCalibrator(Calibrator):
         return self.sGainCoef[band - 1], self.sBiasCoef[band - 1]
 
     def _planck(self, band):
-        satellite = GVAR_SENSOR_SATELLITES.get(self.sid)
-        if satellite is None:
-            raise NotImplementedError(f"No Planck constants for sensor {self.sid}; only GOES-8 to 15 "
-                                      f"(sensors 70-79 and 180-185) are available.")
+        satellite = self.satellite
+        if satellite not in GVAR_PLANCK_COEFFS:
+            raise NotImplementedError(f"No Planck constants for GOES-{satellite}; only GOES-8 to 15 are available.")
         instrument = "imager" if self.imager else "sounder"
         if instrument not in GVAR_PLANCK_COEFFS[satellite]:
             raise NotImplementedError(f"No {instrument} Planck constants for GOES-{satellite}.")

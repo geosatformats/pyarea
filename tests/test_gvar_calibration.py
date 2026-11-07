@@ -177,9 +177,10 @@ def test_planck_tables_are_complete_and_sane(satellite):
 
 @pytest.mark.parametrize("sensor, satellite", [(76, 11), (78, 12), (180, 13), (182, 14), (184, 15)])
 def test_sensor_numbers_map_to_satellites_and_calibrate(sensor, satellite):
-    from pyarea.calibration import GVAR_SENSOR_SATELLITES
+    from pyarea.calibration import gvar_sensor
 
-    assert GVAR_SENSOR_SATELLITES[sensor] == GVAR_SENSOR_SATELLITES[sensor + 1] == satellite
+    assert gvar_sensor(sensor) == (satellite, "imager")
+    assert gvar_sensor(sensor + 1) == (satellite, "sounder")
     cal = GVARCalibrator(sensor, imager_block(sensor)[0])
     temp = cal.calibrate_array(np.array([4000.0]), 4, Calibrator.CAL_TEMP)
     assert np.isfinite(temp).all() and 100 < temp[0] < 400
@@ -188,3 +189,11 @@ def test_sensor_numbers_map_to_satellites_and_calibrate(sensor, satellite):
 def test_goes_16_and_later_are_not_gvar():
     with pytest.raises(NotImplementedError):
         GVARCalibrator(186, imager_block(186)[0]).calibrate_array(np.array([4000.0]), 4, Calibrator.CAL_TEMP)
+
+
+@pytest.mark.parametrize("sensor", [29, 36, 51, 500, 80])
+def test_non_goes_sensors_are_rejected(sensor):
+    from pyarea.calibration import gvar_sensor
+
+    with pytest.raises(ValueError, match="not a GOES"):
+        gvar_sensor(sensor)
