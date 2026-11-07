@@ -1,12 +1,9 @@
 __author__ = 'jano'
 import collections
-import gc
 import math
 import struct
-from multiprocessing import cpu_count
 import logging
 import datetime
-import numexpr as ne
 import numpy as np
 from numpy import nan
 
@@ -16,8 +13,6 @@ import numba
 
 _njit = numba.njit
 
-
-ne.set_num_threads(cpu_count())
 logger = logging.getLogger('nav')
 
 class AreaNav():
@@ -562,16 +557,20 @@ class GVARNav(AreaNav):
         syaw = w = sw = cw = s2w = c2w = nan
         sw1 = cw1 = sw3 = cw3 = nan
         secs = wa = nan
-        imgtim = epoch = timex = time50 = r = nan
+        imgtim = epoch = r = nan
         #b = [[nan for i in range(3)], [nan for i in range(3)], [nan for i in range(3)] ]
         b = np.empty((3,3))
         b[:] = np.nan
-        lit = year = day = nan
-        iftok = hour = minuts = nan
-        count = offset = loop = nan
-        time = [nan] * 2
+        year = day = hour = minuts = nan
         rparms = [nan] * self.MXCDSZ
         # rellst two dimensional array of location of float in o&a set
+
+        # these are filled in below; every instance needs its own, not the lists and array shared through the class
+        self.xs = [nan] * 3
+        self.bt = np.full((3, 3), nan)
+        self.subpoint = [nan] * 2
+        self.elvmax = list(GVARNav.elvmax)
+        self.scnmax = list(GVARNav.scnmax)
 
         # initialize the earth radius constants
         self.aec = self.AE

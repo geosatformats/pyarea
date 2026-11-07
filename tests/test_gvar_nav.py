@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from pyarea import nav as nav_module
-from pyarea.nav import AreaNav
+from pyarea.nav import AreaNav, GVARNav
 
 DATA = Path(__file__).parent / "data"
 FILES = ["goes8_gvar_nav.json", "goes13_gvar_nav.json"]
@@ -198,3 +198,18 @@ def test_to_latlon_matches_visad_port(name, imc_off):
                 assert lon == pytest.approx(ref_lon, abs=1e-4)
                 compared += 1
     assert compared > 20
+
+
+def test_navs_of_different_files_do_not_share_state():
+    """Building a second GVARNav must not change the first; the satellite state is per instance."""
+    first = make_nav(load("goes8_gvar_nav.json"))
+    line, elem = np.array([500.0, 800.0]), np.array([1500.0, 2500.0])
+    lat, lon = first.to_latlon(line, elem)
+    second = make_nav(load("goes13_gvar_nav.json"))
+    again_lat, again_lon = first.to_latlon(line, elem)
+    np.testing.assert_array_equal(again_lat, lat)
+    np.testing.assert_array_equal(again_lon, lon)
+    assert second.xs is not first.xs and second.bt is not first.bt
+    assert second.elvmax is not first.elvmax and second.scnmax is not first.scnmax
+    assert np.isnan(GVARNav.bt).all()  # the class level defaults were never filled in
+    assert GVARNav.elvmax == [0.220896, 0.22089375]
