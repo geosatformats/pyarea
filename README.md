@@ -8,7 +8,7 @@ its structure and logic with a few exceptions imposed by practical aspects
 of Python language. Some additional more efficient functions were added
 (toLineEle2, toLatLon2) to perform navigation and work with numpy arrays.
 
-##Documentation
+## Documentation
 
 The AreaFile can be instantiated from a file or a binary string:
 
