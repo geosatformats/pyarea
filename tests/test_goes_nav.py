@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import pyarea.nav as nav
+from pyarea import utils
 from tests.fake_area_files import IR_WINDOW, NADIR_COL, NADIR_ROW, make_nav_words
 
 
@@ -52,7 +53,7 @@ class TestNavigationInternals:
     @pytest.mark.parametrize(("year", "days"), [(84, 366), (85, 365), (1084, 366)])
     def test_days_in_year(self, year, days):
         """Count the days of leap and normal years."""
-        assert nav._leapyr(year) == days
+        assert utils.leapyear(year) == days
 
     @pytest.mark.parametrize(
         ("hours", "expected"),

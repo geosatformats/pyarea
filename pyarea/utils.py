@@ -116,18 +116,22 @@ def gould2native(number):
         return nativeVal
 
 def mcPI2F(value):
-    val = -value if value < 0 else value
-    fvalue = float(val/10000) + float((val/100) % 100) / 60. + (val % 100) / 3600.
+    """Packed integer (SDDDMMSS for degrees, HHMMSS for hours) to a float, as McIDASUtil.mcPackedIntegerToDouble."""
+    val = abs(int(value))
+    fvalue = val // 10000 + (val // 100 % 100) / 60. + (val % 100) / 3600.
     return -fvalue if value < 0 else fvalue
 
+
 def mcF2PI(value):
-    fval = -value if value < 0 else value
-    j = int(3600*fval + .5)
-    val = 10000 * (j/3600) + 100 * ((j/60) % 60 ) + j % 60
+    """Float degrees (or hours) to a packed integer, rounded to whole seconds, as McIDASUtil.mcDoubleToPackedInteger."""
+    j = int(3600 * abs(value) + .5)
+    val = 10000 * (j // 3600) + 100 * (j // 60 % 60) + j % 60
     return -val if value < 0 else val
 
+
 def leapyear(year):
-    return 366 - ((year%4) + 3)/4
+    """Days in a year, with the McIDAS rule of a leap year every fourth year (right from 1901 to 2099)."""
+    return 366 - ((year % 4) + 3) // 4
 
 
 _field_names_ = names = 'year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1'

@@ -997,16 +997,6 @@ _RDPDG = np.pi / 180.0
 _EQUATORIAL_RADIUS_KM = 6378.137
 
 
-def _packed_to_double(value):
-    """Convert a packed decimal integer to double degrees (or hours).
-
-    Mirrors McIDASUtil.mcPackedIntegerToDouble: SIGN DDD MM SS (or HH MM SS).
-    """
-    val = abs(int(value))
-    dvalue = (val // 10000) + ((val // 100) % 100) / 60.0 + (val % 100) / 3600.0
-    return -dvalue if value < 0 else dvalue
-
-
 def _icon1(yymmdd):
     """YYMMDD -> YYDDD (year/day-of-year), per nvxgoes ICON1."""
     num = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
@@ -1019,10 +1009,6 @@ def _icon1(yymmdd):
     if year % 4 == 0 and month > 2:
         julday += 1
     return 1000 * year + julday
-
-
-def _leapyr(iy):
-    return 366 - ((iy % 4) + 3) // 4
 
 
 def _mc_daytime_to_secs(yrday, hms):
@@ -1038,7 +1024,7 @@ def _mc_daytime_to_secs(yrday, hms):
     # days since a fixed reference (Jan 1 of `year`), matching Java's
     # Calendar-based day-of-year approach for the purpose of subtraction
     dt = datetime.datetime(year, 1, 1) + datetime.timedelta(days=day - 1)
-    seconds = _packed_to_double(hms) * 3600.0
+    seconds = utils.mcPI2F(hms) * 3600.0
     epoch = datetime.datetime(1970, 1, 1)
     return (dt - epoch).total_seconds() + seconds
 
@@ -1080,14 +1066,6 @@ _KernelParams = collections.namedtuple(
 )
 
 
-def _double_to_packed(dvalue):
-    """Convert double degrees (or hours) to a packed decimal integer."""
-    dval = abs(dvalue)
-    j = int(3600.0 * dval + 0.5)
-    value = 10000 * (j // 3600) + 100 * ((j // 60) % 60) + j % 60
-    return -value if dvalue < 0.0 else value
-
-
 def _anomaly_hours(semima, oeccen, xmeana):
     """Return the time in hours that the orbit takes to reach the mean anomaly ``xmeana`` (degrees)."""
     re = 6378.388
@@ -1116,19 +1094,19 @@ def _add_days(ietimy, iday):
     jday = ietimy % 1000 + iday
     if jday < 1:
         jyear -= 1
-        jday += _leapyr(jyear)
-    elif jday > _leapyr(jyear):
-        jday += _leapyr(jyear)
+        jday += utils.leapyear(jyear)
+    elif jday > utils.leapyear(jyear):
+        jday += utils.leapyear(jyear)
         jyear += 1
     return 1000 * (jyear % 100) + jday
 
 
 def _epoch(ietimy, ietimh, anomaly_hours):
     """Move the orbit epoch (YYDDD, HHMMSS) back to perigee, ``anomaly_hours`` earlier."""
-    time, iday = _day_rollover(_packed_to_double(ietimh) - anomaly_hours)
+    time, iday = _day_rollover(utils.mcPI2F(ietimh) - anomaly_hours)
     if iday != 0:
         ietimy = _add_days(ietimy, iday)
-    return ietimy, _double_to_packed(time)
+    return ietimy, utils.mcF2PI(time)
 
 
 def _validate_nav_words(iarr):
@@ -1363,9 +1341,9 @@ class GOESNav(AreaNav):
             spinra = 60000.0 / spinra
         self.tmpscl = spinra / 3600000.0
 
-        deglin = _packed_to_double(int(iarr[16]))
+        deglin = utils.mcPI2F(int(iarr[16]))
         lintot = int(iarr[17])
-        degele = _packed_to_double(int(iarr[18]))
+        degele = utils.mcPI2F(int(iarr[18]))
         ieltot = int(iarr[19])
         self.numsen = max((lintot // 100000) % 100, 1)
         totlin = self.numsen * (lintot % 100000)
@@ -1375,9 +1353,9 @@ class GOESNav(AreaNav):
 
     def _set_attitude(self, iarr):
         """Set the attitude rotation matrix from pitch, yaw, roll and skew."""
-        cpitch = self.rdpdg * _packed_to_double(int(iarr[20]))
-        cyaw = self.rdpdg * _packed_to_double(int(iarr[21]))
-        croll = self.rdpdg * _packed_to_double(int(iarr[22]))
+        cpitch = self.rdpdg * utils.mcPI2F(int(iarr[20]))
+        cyaw = self.rdpdg * utils.mcPI2F(int(iarr[21]))
+        croll = self.rdpdg * utils.mcPI2F(int(iarr[22]))
         skew = 0.0 if utils.is_mcmissing(iarr[28]) else iarr[28] / 100000.0
 
         pskew = np.arctan2(skew, self.radlin / self.radele)
@@ -1395,9 +1373,9 @@ class GOESNav(AreaNav):
 
     def _set_spin_axis(self, iarr):
         """Set the spin-axis rotation matrix from the declination and right ascension."""
-        dec = _packed_to_double(int(iarr[12])) * self.rdpdg
+        dec = utils.mcPI2F(int(iarr[12])) * self.rdpdg
         sindec, cosdec = np.sin(dec), np.cos(dec)
-        ras = _packed_to_double(int(iarr[13])) * self.rdpdg
+        ras = utils.mcPI2F(int(iarr[13])) * self.rdpdg
         sinras, cosras = np.sin(ras), np.cos(ras)
         self.b11 = -sinras
         self.b12 = cosras
@@ -1413,7 +1391,7 @@ class GOESNav(AreaNav):
         """Set the earth-rotation reference, the picture time and the scan line times."""
         raha = _timdif(74001, 0, self.navday, 0) * 1.00273791 / 4.0 + 100.26467
         self.xref = (raha % 360.0) * self.rdpdg
-        self.pictim = _packed_to_double(int(iarr[2]))
+        self.pictim = utils.mcPI2F(int(iarr[2]))
         self.gamma = float(iarr[38]) / 100.0
         self.gamdot = float(iarr[39]) / 100.0
         self._set_scan_times(iarr)
@@ -1422,9 +1400,9 @@ class GOESNav(AreaNav):
         """Set the first/last scan line numbers and times."""
         if iarr[30] > 0 and _has_beta_scan_times(int(iarr[1]) // 100000):
             self.scan1 = float(iarr[30])
-            self.time1 = _packed_to_double(int(iarr[31]))
+            self.time1 = utils.mcPI2F(int(iarr[31]))
             self.scan2 = float(iarr[34])
-            self.time2 = _packed_to_double(int(iarr[35]))
+            self.time2 = utils.mcPI2F(int(iarr[35]))
         else:
             self.scan1 = 1.0
             self.time1 = self.pictim
@@ -1459,7 +1437,7 @@ class GOESNav(AreaNav):
         ied = self.ietimy % 1000
         iefac = (iey - 1) // 4 + 1
         de = 365 * (iey - 1) + iefac + ied - 1
-        te = 1440.0 * de + 60.0 * _packed_to_double(self.ietimh)
+        te = 1440.0 * de + 60.0 * utils.mcPI2F(self.ietimh)
 
         inavy = (self.navday // 1000) % 100
         inavd = self.navday % 1000

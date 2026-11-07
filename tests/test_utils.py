@@ -5,7 +5,7 @@ import struct
 import numpy as np
 import pytest
 
-from pyarea.utils import bcd_words_to_datetime, bcdtime2datetime, is_mcmissing
+from pyarea.utils import bcd_words_to_datetime, bcdtime2datetime, is_mcmissing, leapyear, mcF2PI, mcPI2F
 
 
 @pytest.mark.parametrize(("word", "missing"), [(-2139062144, True), (0x80808080, True), (np.int32(-2139062144), True),
@@ -81,3 +81,34 @@ def test_bcd_decoder_agrees_with_visad_gvarnav():
         assert decoded == t
         minutes = (decoded - datetime.datetime(1950, 1, 1)).total_seconds() / 60.0
         assert abs(_visad_epoch_minutes(w1, w2) - minutes) < 1e-6
+
+
+@pytest.mark.parametrize(
+    ("packed", "value"),
+    [(0, 0.0), (123456, 12 + 34 / 60 + 56 / 3600), (-123456, -(12 + 34 / 60 + 56 / 3600)), (3000, 0.5),
+     (240000, 24.0), (-902030, -(90 + 20 / 60 + 30 / 3600)), (1, 1 / 3600)])
+def test_packed_integer_conversions(packed, value):
+    """McIDAS packs degrees as SDDDMMSS and hours as HHMMSS; the sign applies to the whole value."""
+    assert mcPI2F(packed) == pytest.approx(value, abs=1e-12)
+    assert mcF2PI(value) == packed
+
+
+def test_packed_integer_round_trip_and_rounding():
+    rng = np.random.default_rng(3)
+    for seconds in rng.integers(-90 * 3600, 360 * 3600, 5000):
+        sign = -1 if seconds < 0 else 1
+        s = abs(int(seconds))
+        packed = sign * (10000 * (s // 3600) + 100 * (s // 60 % 60) + s % 60)
+        assert mcF2PI(mcPI2F(packed)) == packed
+    assert mcF2PI(0.5 / 3600 + 1e-9) == 1  # whole seconds, rounded half up
+    assert mcF2PI(0.4 / 3600) == 0
+
+
+def test_numpy_integers_are_accepted():
+    assert mcPI2F(np.int32(-123456)) == pytest.approx(-mcPI2F(123456))
+
+
+@pytest.mark.parametrize(("year", "days"), [(1996, 366), (1997, 365), (2000, 366), (2016, 366), (2017, 365), (84, 366), (85, 365)])
+def test_leapyear(year, days):
+    assert leapyear(year) == days
+    assert isinstance(leapyear(year), int)
