@@ -4,6 +4,15 @@ import struct
 import ctypes as C
 #binary values representing a missing value in McIDAS
 MCMISSING = int('0x80808080', 16)
+
+
+def is_mcmissing(word):
+    """True if a 32-bit directory or navigation word is the McIDAS "missing" value.
+
+    ``MCMISSING`` is the unsigned bit pattern, but the words of a block are usually read as signed integers, where
+    the same pattern is -2139062144; both are recognised.
+    """
+    return (int(word) & 0xFFFFFFFF) == MCMISSING
 INT32SIZE = np.int32().itemsize
 
 def yyyddd_hhmmss2datetime(yyyddd, hhmmss ):

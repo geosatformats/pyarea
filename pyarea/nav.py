@@ -1061,7 +1061,6 @@ class LALONav(AreaNav):
 GOES_MAGIC = AreaNav.GOES.encode("ascii")
 
 _RDPDG = np.pi / 180.0
-_MCMISSING = -2139062144  # McIDAS "missing" (0x80808080 as signed int32), used for iarr[28]/skew
 
 _EQUATORIAL_RADIUS_KM = 6378.137
 
@@ -1447,7 +1446,7 @@ class GOESNav(AreaNav):
         cpitch = self.rdpdg * _packed_to_double(int(iarr[20]))
         cyaw = self.rdpdg * _packed_to_double(int(iarr[21]))
         croll = self.rdpdg * _packed_to_double(int(iarr[22]))
-        skew = 0.0 if iarr[28] == _MCMISSING else iarr[28] / 100000.0
+        skew = 0.0 if utils.is_mcmissing(iarr[28]) else iarr[28] / 100000.0
 
         pskew = np.arctan2(skew, self.radlin / self.radele)
         stp, ctp = np.sin(cpitch), np.cos(cpitch)
