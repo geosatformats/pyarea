@@ -220,7 +220,7 @@ class AreaNav():
         l, c = linele
         l1 = self.startLine + ( self.magLine * (l - self.startImageLine)) / self.resLine
         if self.isLineFlipped:
-            l1 -= self.lineOffset
+            l1 = self.lineOffset - l1
         c1 = self.startElement + ( self.magElement * (c - self.startImageElement)) / self.resElement
 
         return [l1,c1]
@@ -251,6 +251,135 @@ class AreaNav():
         subs = set(cls.__subclasses__())
         return subs.union(*(i.get_subclasses() for i in subs))
 
+
+
+_GvarParams = collections.namedtuple(
+    "_GvarParams",
+    "instr ff doff elvmax elvln scnpx scnmax pma rma "
+    "b00 b01 b02 b10 b11 b12 b20 b21 b22 xs0 xs1 xs2 aebe2c aebe3c aebe4c q3 east",
+)
+
+
+@_njit
+def _gvar_to_latlon(rl, rp, p):
+    """Image line/pixel (flat float arrays, GVAR image coordinates) to geodetic lat/lon in degrees.
+
+    This is the GVAR "lpoint" computation of the Operations Ground Equipment interface document, ported from the
+    McIDAS ``nvxgvar`` code. NaN in, or a line of sight that misses the Earth, gives NaN.
+    """
+    n = rl.size
+    lat = np.full(n, np.nan)
+    lon = np.full(n, np.nan)
+    for i in range(n):
+        line = rl[i]
+        pixel = rp[i]
+        if not (np.isfinite(line) and np.isfinite(pixel)):
+            continue
+        # the sounder routines take the sounder resolution into account, so pretend the image is at resolution 1
+        if p.instr == 2:
+            line = (line + 9.0) / 10.0
+            pixel = (pixel + 9.0) / 10.0
+        # elevation and scan angles of the line and pixel
+        if p.instr == 1:
+            alpha0 = p.elvmax - (line - 4.5) * p.elvln
+        else:
+            alpha0 = p.elvmax - (line - 2.5) * p.elvln
+        zeta0 = (pixel - 1.0) * p.scnpx - p.scnmax
+        # second order origin offset correction
+        alpha = alpha0 - alpha0 * zeta0 * p.doff
+        zeta = zeta0 + 0.5 * alpha0 * alpha0 * p.doff
+        # trigonometric functions of the angles, corrected for the roll and pitch misalignments
+        ca = math.cos(alpha)
+        sa = math.sin(alpha)
+        cz = math.cos(zeta)
+        da = alpha - p.pma * sa * (p.ff / cz + math.tan(zeta)) - p.rma * (1.0 - ca / cz)
+        dz = zeta + p.ff * p.rma * sa
+        cz = math.cos(dz)
+        # pointing vector in instrument coordinates, then in earth fixed coordinates
+        g0 = math.sin(dz)
+        g1 = -cz * math.sin(da)
+        g2 = cz * math.cos(da)
+        e0 = p.b00 * g0 + p.b01 * g1 + p.b02 * g2
+        e1 = p.b10 * g0 + p.b11 * g1 + p.b12 * g2
+        e2 = p.b20 * g0 + p.b21 * g1 + p.b22 * g2
+        # intersect the pointing vector with the earth surface (a quadratic equation)
+        q1 = e0 * e0 + e1 * e1 + p.aebe2c * e2 * e2
+        q2 = p.xs0 * e0 + p.xs1 * e1 + p.aebe2c * p.xs2 * e2
+        d = q2 * q2 - q1 * p.q3
+        if abs(d) < 1e-9:
+            d = 0.0
+        if d < 0.0:  # points off the earth
+            continue
+        d = math.sqrt(d)
+        h = -(q2 + d) / q1
+        u0 = p.xs0 + h * e0
+        u1 = p.xs1 + h * e1
+        u2 = p.xs2 + h * e2
+        # sine of the geocentric latitude, then the geodetic latitude and the longitude
+        d1 = u2 / math.sqrt(u0 * u0 + u1 * u1 + u2 * u2)
+        lat[i] = math.atan(p.aebe2c * d1 / math.sqrt(1.0 - d1 * d1)) * 57.29577951308232
+        lon[i] = math.atan2(u1, u0) * 57.29577951308232 * p.east
+    return lat, lon
+
+
+@_njit
+def _gvar_to_image(lat, lon, p):
+    """Geodetic lat/lon in degrees (flat float arrays) to image line/pixel (GVAR image coordinates).
+
+    The inverse of :func:`_gvar_to_latlon` (the "gpoint" routine). NaN where the point is not visible from the
+    satellite, or where lat or lon is NaN.
+    """
+    n = lat.size
+    line = np.full(n, np.nan)
+    pixel = np.full(n, np.nan)
+    for i in range(n):
+        if not (abs(lat[i]) <= 90.0 and np.isfinite(lon[i])):
+            continue
+        rlat = lat[i] * 0.017453292519943295
+        rlon = lon[i] * 0.017453292519943295 * p.east
+        # sine of the geodetic latitude and of the geocentric latitude
+        sing = math.sin(rlat)
+        w1 = p.aebe4c * sing * sing
+        slat = ((0.375 * w1 - 0.5) * w1 + 1.0) * sing / p.aebe2c
+        # local earth radius at the point, and its cartesian coordinates
+        w2 = slat * slat
+        w1 = p.aebe3c * w2
+        w1 = (0.375 * w1 - 0.5) * w1 + 1.0
+        u2 = slat * w1
+        w2 = w1 * math.sqrt(1.0 - w2)
+        u0 = w2 * math.cos(rlon)
+        u1 = w2 * math.sin(rlon)
+        # pointing vector from the instrument to the point
+        f0 = u0 - p.xs0
+        f1 = u1 - p.xs1
+        f2 = u2 - p.xs2
+        w2 = u0 * f0 + u1 * f1 + u2 * f2 * p.aebe2c
+        if not w2 <= 0.0:  # not visible
+            continue
+        # the pointing vector in instrument coordinates
+        t0 = p.b00 * f0 + p.b10 * f1 + p.b20 * f2
+        t1 = p.b01 * f0 + p.b11 * f1 + p.b21 * f2
+        t2 = p.b02 * f0 + p.b12 * f1 + p.b22 * f2
+        # scan and elevation angles, corrected for the roll and pitch misalignments
+        gam = math.atan(t0 / math.sqrt(t1 * t1 + t2 * t2))
+        alf = -math.atan(t1 / t2)
+        w1 = math.sin(alf)
+        w2 = math.cos(gam)
+        alpha1 = alf + p.rma * (1.0 - math.cos(alf) / w2) + p.pma * w1 * (p.doff / w2 + math.tan(gam))
+        gam = gam - p.ff * p.rma * w1
+        alf = alpha1 + alpha1 * gam * p.doff
+        gam = gam - 0.5 * alpha1 * alpha1 * p.doff
+        # fractional line and pixel numbers
+        tmplin = (p.elvmax - alf) / p.elvln
+        tmplin = tmplin + 4.5 if p.instr == 1 else tmplin + 2.5
+        tmpele = (p.scnmax + gam) / p.scnpx + 1.0
+        # sounder navigation returns resolution 10 values
+        if p.instr == 2:
+            tmplin = tmplin * 10.0 - 9.0
+            tmpele = tmpele * 10.0 - 9.0
+        line[i] = tmplin
+        pixel[i] = tmpele
+    return line, pixel
 
 
 class GVARNav(AreaNav):
@@ -843,463 +972,84 @@ class GVARNav(AreaNav):
                 at[i][j] = a[i][0] * rpy[0][j] + a[i][1] * rpy[1][j] +a[i][2] * rpy[2][j]
 
 
-    def toLatLon2(self, lines=None, cols=None):
+    def _kernel_params(self):
+        """The scalar constants the numba kernels need, for the instrument (imager or sounder) of this file."""
+        k = self.instr - 1
+        bt, xs = self.bt, self.xs
+        return _GvarParams(
+            instr=int(self.instr),
+            ff=float(-self.iflip) if self.instr == 2 else float(self.iflip),
+            doff=float(self.scnmax[k] - self.ewnom[k]),
+            elvmax=float(self.elvmax[k]), elvln=float(self.elvln[k]),
+            scnpx=float(self.scnpx[k]), scnmax=float(self.scnmax[k]),
+            pma=float(self.pma), rma=float(self.rma),
+            b00=float(bt[0][0]), b01=float(bt[0][1]), b02=float(bt[0][2]),
+            b10=float(bt[1][0]), b11=float(bt[1][1]), b12=float(bt[1][2]),
+            b20=float(bt[2][0]), b21=float(bt[2][1]), b22=float(bt[2][2]),
+            xs0=float(xs[0]), xs1=float(xs[1]), xs2=float(xs[2]),
+            aebe2c=float(self.aebe2c), aebe3c=float(self.aebe3c), aebe4c=float(self.aebe4c),
+            q3=float(self.q3), east=1.0 if self.isEastPositive else -1.0,
+        )
+
+    def _area_to_image(self, line, elem):
+        """AREA (file) coordinates to GVAR image coordinates."""
+        if self.isLineFlipped:
+            line = self.lineOffset - line
+        return (self.startImageLine + self.resLine * (line - self.startLine) / self.magLine,
+                self.startImageElement + self.resElement * (elem - self.startElement) / self.magElement)
+
+    def _image_to_area(self, line, elem):
+        """GVAR image coordinates to AREA (file) coordinates."""
+        line = self.startLine + self.magLine * (line - self.startImageLine) / self.resLine
+        if self.isLineFlipped:
+            line = self.lineOffset - line
+        return line, self.startElement + self.magElement * (elem - self.startImageElement) / self.resElement
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive. NaN where the line of sight misses the Earth, or the input is NaN.
         """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        lat, lon = _gvar_to_latlon(np.ascontiguousarray(image_line).ravel(), np.ascontiguousarray(image_elem).ravel(),
+                                   self._kernel_params())
+        return lat.reshape(line.shape), lon.reshape(line.shape)
 
-        :param lines:
-        :param cols:
-        :return:
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is not visible from the satellite.
         """
-        # try:
-        #     # broadcasting is faster here
-        #     lines = lines[:, np.newaxis]
-        #     cols = cols[np.newaxis, :]
-        # except Exception as e:  # scalar version, r
-        #     print e, 1
-        #     pass
-        #dude, make sure the inout pyarea pyarea coordinates not GVAR image coordinates
-        rl, rp = self.areaCoordtoImageCoord_np(linele=[cols, lines])
-        #print rl, rp
-        #rl, rp = lines, cols
-        cshape = 3, rl.shape[0], rp.shape[1]
-        g1 = np.empty(cshape)
-        g1[:] = nan
-        g = np.empty(cshape)
-        g[:] = nan
-
-        u = np.empty(cshape)
-        u[:] = nan
-
-        #  compute elevation and scan angles (e,s) related to input
-        #  line and pixel numbers
-        alpha0 = self.elvmax[0] - (rl - 4.5) * self.elvln[0]
-        zeta0 = (rp - 1.0) * self.scnpx[self.instr - 1] - self.scnmax[self.instr - 1]
-
-        # compute sign of misalignment corrections and origin offset
-        ff = float(-self.iflip) if self.instr == 2 else float(self.iflip)
-        doff = self.scnmax[self.instr - 1] - self.ewnom[self.instr - 1]
-
-        # add new second order origin offset correction
-
-        alpha = alpha0 - alpha0 * zeta0 * doff
-        zeta = zeta0 + 0.5 * alpha0 * alpha0 * doff
-
-        #  transform elevation and scan angles to geographic coordinates
-        #  (this is the old 'lpoint' routine...
-
-        # computes trigonometric funktions of the scan and elevation
-        # angles corrected for the roll and pitch misalignments
-        ca = np.cos(alpha)
-        sa = np.sin(alpha)
-        cz = np.cos(zeta)
-        da = alpha - self.pma * sa * (ff / cz + np.tan(zeta)) - self.rma * (1.0 - ca / cz)
-        dz = zeta + ff * self.rma * sa
-
-        # corrected scan angle
-        cz = np.cos(dz)
-
-
-        # computes pointing vector in instrument coordinates
-        g[0] = np.sin(dz)
-        g[1] = -cz * np.sin(da)
-        g[2] = cz * np.cos(da)
-
-        # transforms the pointing vector to earth fixed coordinates
-        g1[0] = self.bt[0][0] * g[0] + self.bt[0][1] * g[1] + self.bt[0][2] * g[2]
-        g1[1] = self.bt[1][0] * g[0] + self.bt[1][1] * g[1] + self.bt[1][2] * g[2]
-        g1[2] = self.bt[2][0] * g[0] + self.bt[2][1] * g[1] + self.bt[2][2] * g[2]
-
-        # computes coefficients and solves a quadratic equation to
-        # find the intersect of the pointing vector with the earth
-        # surface
-        q1 = g1[0] * g1[0] + g1[1] * g1[1] + self.aebe2c * g1[2] * g1[2]
-        q2 = self.xs[0] * g1[0] + self.xs[1] * g1[1] + self.aebe2c * self.xs[2] * g1[2]
-        d = q2 * q2 - q1 * self.q3
-
-        # if the discriminant of the equation, d, is negative, the
-        # instrument points off the earth
-        dm = np.abs(d) < 1. - 9
-        d = np.where(dm, 0, d)
-        dm1 = d >= 0
-
-
-        d = np.sqrt(d)
-        #print 'd2 is %s ' % d
-
-        # slant distance from the instrument to the earth point
-        h = -(q2 + d) / q1
-
-        # cartesian coordinates of the earth point
-        u[0] = self.xs[0] + h * g1[0]
-        u[1] = self.xs[1] + h * g1[1]
-        u[2] = self.xs[2] + h * g1[2]
-
-        # sinus of geocentric latitude
-        d1 = u[2] / np.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
-
-
-        rlat = np.where(dm1, np.arctan(self.aebe2c * d1 / np.sqrt(1. - d1 * d1)), nan)
-        rlon = np.where(dm1, np.arctan2(u[1], u[0]), nan)
-
-        rlat = rlat * self.DEG
-        rlon = rlon * self.DEG
-
-        #  put longitude into mcidas form
-        if not self.isEastPositive:
-            rlon = -rlon
-        return rlat, rlon
-
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        image_line, image_elem = _gvar_to_image(np.ascontiguousarray(lat).ravel(), np.ascontiguousarray(lon).ravel(),
+                                                self._kernel_params())
+        line, elem = self._image_to_area(image_line, image_elem)
+        return line.reshape(lat.shape), elem.reshape(lat.shape)
 
     def toLatLon(self, linele=None):
-        """
-            Converts form satelite coordinates to Lat/Lon
-
-        """
-
-        rl = rp = rlat = rlon = nan
-        number = len(linele[0])
-
-        # alpha = elevation angle (rad)
-        # zeta = scan angle (rad)
-        q1 = q2 = d = h = alpha = zeta = alpha0 = zeta0 = ff = doff = nan
-        g1 = [nan for i in range(3)]
-        g = [nan for i in range(3)]
-        u = [nan for i in range(3)]
-        sa = ca =  da = dz = d1 = cz = nan
-
-        latlon = [[nan for i in range(number)], [nan for i in range(number)]]
-
-        #  transform line/pixel to geographic coordinates:
-        imglinele = self.areaCoordtoImageCoord(linele=linele)
-
-        for point in range(number):
-
-            #  set input line/pixel numbers
-            rl = imglinele[self.indexLine][point]
-            rp = imglinele[self.indexEle][point]
-
-            #  if doing sounder nav, have to trick routines into thinking image is
-            #  at res 1, because nav routines take sounder res into account
-            if self.instr == 2:
-                rl = (rl + 9.) / 10.
-                rp = (rp + 9.) / 10.
-
-
-            #  compute elevation and scan angles (e,s) related to input
-            #  line and pixel numbers
-
-            if self.instr == 1:
-                alpha0 = self.elvmax[0] - (rl - 4.5) * self.elvln[0]
-            else:
-                alpha0 = self.elvmax[1] - (rl - 2.5) * self.elvln[1]
-
-            zeta0 = (rp - 1.0) * self.scnpx[self.instr - 1] - self.scnmax[self.instr - 1]
-            #print alpha0, zeta0
-            # compute sign of misalignment corrections and origin offset
-            ff = float(-self.iflip) if self.instr == 2 else float(self.iflip)
-            doff = self.scnmax[self.instr - 1] - self.ewnom[self.instr - 1]
-            #print doff
-
-            # add new second order origin offset correction
-            alpha = alpha0 - alpha0 * zeta0 * doff
-            zeta = zeta0 + 0.5 * alpha0 * alpha0 * doff
-            #print alpha, zeta
-            #  transform elevation and scan angles to geographic coordinates
-            #  (this is the old 'lpoint' routine...
-
-            # computes trigonometric funktions of the scan and elevation
-            # angles corrected for the roll and pitch misalignments
-            ca = math.cos(alpha)
-            sa = math.sin(alpha)
-            cz = math.cos(zeta)
-            da = alpha - self.pma * sa * (ff / cz + math.tan(zeta)) - self.rma * (1.0 - ca / cz)
-            dz = zeta + ff * self.rma * sa
-
-            # corrected scan angle
-            cz = math.cos(dz)
-
-
-            # computes pointing vector in instrument coordinates
-            g[0] = math.sin(dz)
-            g[1] = -cz * math.sin(da)
-            g[2] = cz * math.cos(da)
-
-            # transforms the pointing vector to earth fixed coordinates
-            g1[0] = self.bt[0][0] * g[0] + self.bt[0][1] * g[1] + self.bt[0][2] * g[2]
-            g1[1] = self.bt[1][0] * g[0] + self.bt[1][1] * g[1] + self.bt[1][2] * g[2]
-            g1[2] = self.bt[2][0] * g[0] + self.bt[2][1] * g[1] + self.bt[2][2] * g[2]
-
-            # computes coefficients and solves a quadratic equation to
-            # find the intersect of the pointing vector with the earth
-            # surface
-            q1 = g1[0] * g1[0] + g1[1] * g1[1] + self.aebe2c * g1[2] * g1[2]
-            q2 = self.xs[0] * g1[0] + self.xs[1] * g1[1] + self.aebe2c * self.xs[2] * g1[2]
-            d = q2 * q2 - q1 * self.q3
-
-            if abs(d) < 1. - 9:
-                d=0.
-            # if the discriminant of the equation, d, is negative, the
-            # instrument points off the earth
-
-
-            if d >= 0.0:
-                d = math.sqrt(d)
-
-                # slant distance from the instrument to the earth point
-                h = -(q2 + d) / q1
-
-                # cartesian coordinates of the earth point
-                u[0] = self.xs[0] + h * g1[0]
-                u[1] = self.xs[1] + h * g1[1]
-                u[2] = self.xs[2] + h * g1[2]
-
-                # sinus of geocentric latitude
-                d1 = u[2] / math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
-
-                # geographic (geodetic) coordinates of the point
-                rlat = math.atan(self.aebe2c * d1 / math.sqrt(1. - d1 * d1))
-                rlon = math.atan2(u[1], u[0])
-            else:
-                latlon[self.indexLat][point] = nan
-                latlon[self.indexLon][point] = nan
-                continue
-
-            rlat = rlat * self.DEG
-            rlon = rlon * self.DEG
-
-            #  put longitude into mcidas form
-            if not self.isEastPositive:
-                rlon = -rlon
-
-            #  see if we have to convert to x y z coordinates
-            if self.itype == 2: #what the heck is this? the func is commented
-                pass
-                # llcart(ylat,ylon,xlat,xlon,z)
-            else:
-                latlon[self.indexLat][point] = rlat
-                latlon[self.indexLon][point] = rlon
-
-
-        # end point for loop
-
-        return latlon
-
-    def toLinEle2(self, lats=None, lons=None):
-        # print '#'*50,
-        # print 'AREA',
-        # print '#' * 50
-
-        #print self.resLine, self.resElement, self.magLine, self.magElement, self.startLine, self.startElement, self.startImageLine, self.startImageElement, self.isLineFlipped, self.lineOffset
-        #print self.nadnsc, self.nadnsi, self.nadewc, self.nadewi, self.elvmax[0], self.scnmax[0]
-        h_, w_ = lats.shape
-
-        latsm = lats != nan
-        lonsm = lons != nan
-
-
-        hw = lats[latsm].size
-        # f = np.empty((3,h_,w_))
-        f = np.empty((3,hw))
-        # ft = np.empty((3,h_,w_))
-        ft = np.empty((3,hw))
-        # u = np.empty((3,h_,w_))
-        u = np.empty((3,hw))
-        f[:] = nan
-        ft[:] = nan
-        u[:] = nan
-
-        #lats and lons can contain nans
-        ff = float(-self.iflip) if self.instr == 2 else float(self.iflip)
-        doff = self.scnmax[self.instr - 1] - self.ewnom[self.instr - 1]
-        rlat = lats[latsm] * self.RAD
-        rlon = lons[lonsm] * self.RAD
-        if not self.isEastPositive:
-            rlon = -rlon
-
-        # transform lat/lon to elevation and scan angles
-        # (used to be the gpoint routine...)
-
-        # computes sinus of geographic (geodetic) latitude
-        sing = np.sin(rlat)
-        w1 = self.aebe4c * sing * sing
-        # sinus of the geocentric latitude
-        slat = ((0.375 * w1 - 0.5) * w1 + 1.) * sing / self.aebe2c
-
-        # computes local earth radius at specified point
-        w2 = slat * slat
-        w1 = self.aebe3c * w2
-        w1 = (0.375 * w1 - 0.5) * w1 + 1.
-
-        # computes cartesian coordinates of the point
-        u[2] = slat * w1
-        w2 = w1 * np.sqrt(1. - w2)
-        u[0] = w2 * np.cos(rlon)
-        u[1] = w2 * np.sin(rlon)
-        # pointing vector from instrument to the earth point
-        f[0] = u[0] - self.xs[0]
-        f[1] = u[1] - self.xs[1]
-        f[2] = u[2] - self.xs[2]
-        w2 = u[0] * f[0] + u[1] * f[1] + u[2] * f[2] * self.aebe2c
-
-        #wmask = w2 <= 0.
-        wmask = ~np.isnan(w2)
-
-
-        # converts pointing vector to instrument coordinates
-        ft[0] = self.bt[0][0] * f[0] + self.bt[1][0] * f[1] + self.bt[2][0] * f[2]
-        ft[1] = self.bt[0][1] * f[0] + self.bt[1][1] * f[1] + self.bt[2][1] * f[2]
-        ft[2] = self.bt[0][2] * f[0] + self.bt[1][2] * f[1] + self.bt[2][2] * f[2]
-
-
-        # converts pointing vector to scan and elevation angles and
-        # corrects for the roll and pitch misalignments
-        gam = np.arctan(ft[0] / np.sqrt(ft[1] * ft[1] + ft[2] * ft[2]))
-        alf = -np.arctan(ft[1] / ft[2])
-        w1 = np.sin(alf)
-        w2 = np.cos(gam)
-        alpha1 = alf + self.rma * (1. - np.cos(alf) / w2) + self.pma * w1 * (doff / w2 + np.arctan(gam))
-        gam = gam - ff * self.rma * w1
-        alf = alpha1 + alpha1 * gam * doff
-        gam = gam - 0.5 * alpha1 * alpha1 * doff
-
-        # convert elevation and scan angles to line/pixel coordinates
-
-        # compute fractional line number
-
-        tmplin = (self.elvmax[self.instr - 1] - alf) / self.elvln[self.instr - 1]
-        tmplin = tmplin + 4.5 if self.instr == 1 else tmplin + 2.5
-
-        # compute fractional pixel number
-        tmpele = (self.scnmax[self.instr - 1] + gam) / self.scnpx[self.instr - 1] + 1.
-
-        # if doing sounder nav, change lin & ele returned to res 10 values
-        if self.instr == 2:
-            tmplin *= 10. - 9.
-            tmpele *= 10. - 9.
-
-        lin = np.where(wmask, tmplin, 0)
-        ele = np.where(wmask, tmpele, 0)
-        # print self.startLine, self.startElement
-        # print self.magLine, self.magElement, self.resLine
-        # print self.startImageLine, self.startImageElement
-        alin, aele= self.imageCoordToAreaCoord_np(linele=[lin, ele])
-        #print alin, aele
-
-
-        olin = np.empty_like(lats)
-
-        olin[:] = 0
-        oele = np.empty_like(lons)
-        oele[:] = 0
-        olin[latsm] = alin
-        oele[lonsm] = aele
-        return olin, oele
-
-
+        """Convert ``[[elements], [lines]]`` (file coordinates) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        return [lat, lon]
 
     def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
 
-        tmplin = tmpele = sing = slat = w1 = w2 = ff = doff = alpha1 = rlat = rlon = gam = alf = nan
-        f = [nan] * 3
-        ft = [nan] * 3
-        u = [nan] * 3
-        number = len(latlon[0])
-        linele = [[nan for i in range(number)], [nan for i in range(number)]]
-        ff = float(-self.iflip) if self.instr == 2 else float(self.iflip)
-        doff = self.scnmax[self.instr - 1] - self.ewnom[self.instr - 1]
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
 
-        for point in range(number):
-
-            if abs(latlon[self.indexLat][point]) > 90.:
-                linele[self.indexLine][point] = nan
-                linele[self.indexEle][point] = nan
-                continue
-
-            rlat = float(latlon[self.indexLat][point] * self.RAD)
-            rlon = float(latlon[self.indexLon][point] * self.RAD)
-            if not self.isEastPositive:
-                rlon = -rlon
-
-            # transform lat/lon to elevation and scan angles
-            # (used to be the gpoint routine...)
-
-            # computes sinus of geographic (geodetic) latitude
-            sing = math.sin(rlat)
-            w1 = self.aebe4c * sing * sing
-
-            # sinus of the geocentric latitude
-            slat = ((0.375 * w1 - 0.5) * w1 + 1.) * sing / self.aebe2c
-
-            # computes local earth radius at specified point
-            w2 = slat * slat
-            w1 = self.aebe3c * w2
-            w1 = (0.375 * w1 - 0.5) * w1 + 1.
-
-            # computes cartesian coordinates of the point
-            u[2] = slat * w1
-            w2 = w1 * math.sqrt(1. - w2)
-            u[0] = w2 * math.cos(rlon)
-            u[1] = w2 * math.sin(rlon)
-
-            # pointing vector from instrument to the earth point
-            f[0] = u[0] - self.xs[0]
-            f[1] = u[1] - self.xs[1]
-            f[2] = u[2] - self.xs[2]
-            w2 = u[0] * f[0] + u[1] * f[1] + u[2] * f[2] * self.aebe2c
-
-            # verifies visibility of the point
-            if w2 <= 0.0:
-                # converts pointing vector to instrument coordinates
-                ft[0] = self.bt[0][0] * f[0] + self.bt[1][0] * f[1] + self.bt[2][0] * f[2]
-                ft[1] = self.bt[0][1] * f[0] + self.bt[1][1] * f[1] + self.bt[2][1] * f[2]
-                ft[2] = self.bt[0][2] * f[0] + self.bt[1][2] * f[1] + self.bt[2][2] * f[2]
-
-                # converts pointing vector to scan and elevation angles and
-                # corrects for the roll and pitch misalignments
-                gam = math.atan(ft[0] / math.sqrt(ft[1] * ft[1] + ft[2] * ft[2]))
-                alf = -math.atan(ft[1] / ft[2])
-                w1 = math.sin(alf)
-                w2 = math.cos(gam)
-                alpha1 = alf + self.rma * (1. - math.cos(alf) / w2) + self.pma * w1 * (doff / w2 + math.tan(gam))
-                gam = gam - ff * self.rma * w1
-                alf = alpha1 + alpha1 * gam * doff
-                gam = gam - 0.5 * alpha1 * alpha1 * doff
-
-            else:
-                # not visible...
-                linele[self.indexLine][point] = nan
-                linele[self.indexEle][point] = nan
-                continue
-            # convert elevation and scan angles to line/pixel coordinates
-
-            # compute fractional line number
-
-            tmplin = (self.elvmax[self.instr - 1] - alf) / self.elvln[self.instr - 1]
-            tmplin = tmplin + 4.5 if self.instr == 1 else tmplin + 2.5
-
-
-            # compute fractional pixel number
-            tmpele = (self.scnmax[self.instr - 1] + gam) / self.scnpx[self.instr - 1] + 1.
-
-            # convert internal 8 byte values to 4 bytes
-            linele[self.indexLine][point] = float(tmplin)
-            linele[self.indexEle][point] = float(tmpele)
-
-            # if doing sounder nav, change lin & ele returned to res 10 values
-            if self.instr == 2:
-                linele[self.indexLine][point] = linele[self.indexLine][point] * 10. - 9.
-                linele[self.indexEle][point] = linele[self.indexEle][point] * 10. - 9.
-
-
-            # end for loop on points
-        # Return in 'File' coordinates
-
-        return self.imageCoordToAreaCoord(linele, linele)
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)
 
     def getSubpoint(self):
 
         return self.sublat * self.DEG, self.sublon * self.DEG
-
 
 
 class LALONav(AreaNav):
