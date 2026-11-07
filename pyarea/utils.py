@@ -173,40 +173,38 @@ class BCDDateTime(C.BigEndianStructure, ):
 
         return d
 
-def bcdtime2datetime(bytes=None, byte_order=None):
+_BCD_NAMES = ('year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1',
+              'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1')
+
+
+def bcd_words_to_datetime(word1, word2):
+    """Decode a BCD time stored in two 32-bit words, as ``YYYYDDDH`` and ``HMMSSmmm`` hexadecimal digits.
+
+    The words are integers, i.e. already decoded in the byte order of the file they came from, so this does not
+    depend on that byte order. ``0x19962562, 0x14515000`` is 1996 day 256 (September 12), 21:45:15.000.
     """
-            Converts BCD time represented as binary string in 8 8-bit words to a python datetime, in BIG endian
-            goddamnit.
-
-
-    """
-    assert byte_order is not None, 'byte_order has to be supplied'
-
-    if byte_order != '>':
-        lb = len(bytes)
-        big_end_bytes = struct.unpack('>%dB' % lb, struct.pack('%s%dB' % (byte_order, lb), *bytes))
-    else:
-        big_end_bytes = bytes
-
-
-    names = 'year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1'
-
-    values = list()
-    for byte in big_end_bytes:
-            for val in (byte >> 4, byte & 15):  # split in 2 nibbles, use shift by 4 and bitwise & 15 to get the values
-                    values.append(val)
-    d = dict(zip(names, values))
-    # compose year
+    chars = struct.pack('>2I', int(word1) & 0xFFFFFFFF, int(word2) & 0xFFFFFFFF)
+    nibbles = [value for byte in chars for value in (byte >> 4, byte & 15)]
+    d = dict(zip(_BCD_NAMES, nibbles))
     year = d['year_1000'] * 1000 + d['year_100'] * 100 + d['year_10'] * 10 + d['year_1']
     yday = d['day_100'] * 100 + d['day_10'] * 10 + d['day_1']
     month, day = get_month_day(year, yday, True)
     hour = d['hour_10'] * 10 + d['hour_1']
     minute = d['min_10'] * 10 + d['min_1']
     second = d['sec_10'] * 10 + d['sec_1']
-    milisecond = d['msec_100'] * 100 + d['msec_10'] * 10 + d['msec_1']
-    #i milisec = 1000 microseconds, python does NOT have miliseconds
-    #print year, yday, hour, minute, second, milisecond
-    return datetime.datetime(year, month, day, hour, minute, second, milisecond*1000) # to convert mniliseconds to microseconds
+    millisecond = d['msec_100'] * 100 + d['msec_10'] * 10 + d['msec_1']
+    return datetime.datetime(year, month, day, hour, minute, second, millisecond * 1000)  # microseconds
+
+
+def bcdtime2datetime(bytes=None, byte_order=None):
+    """Convert a BCD time given as the 8 bytes it occupies in a file (two 32-bit words) to a datetime.
+
+    ``byte_order`` is the byte order of the file's 32-bit words, ``'>'`` or ``'<'``. The bytes of each word are in
+    that order, so in a little-endian file the digits of each word appear reversed.
+    """
+    assert byte_order in ('>', '<'), 'byte_order has to be supplied, as > or <'
+    word1, word2 = struct.unpack(f'{byte_order}2I', bytearray(bytes))
+    return bcd_words_to_datetime(word1, word2)
 
 
 def julday(month, day, year, hour=0, minute=0, second=0):

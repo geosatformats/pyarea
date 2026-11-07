@@ -863,42 +863,15 @@ class GVARNav(AreaNav):
 
 
     def bcd2datetime(self, w1, w2):
+        """Convert two 32-bit words holding a BCD time (already decoded in the file's byte order) to a datetime.
+
+        Also sets ``self.flywheel`` from the flag bit the time code carries.
         """
-            converts a 2word 4 bytes binary string representing a datetime in  BCD format
-            into a datetime object
-
-        """
-        names = 'year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1'
-        #w1 and 2 should be  little endian, the code handles big endian so convert conditionally
-        if self.byte_order == '<':
-            #chars = struct.pack('>i', w1) + struct.pack('>i', w2)
-            chars = struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order='>', size=1, format_str=self.int_format), w1) + struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order='>', size=1, format_str=self.int_format), w2)
-        else:
-            chars = struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order='>', size=1, format_str=self.int_format),w1) + struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order='>', size=1, format_str=self.int_format), w2)
-        values = list()
-        k = 0
-        for i, byte in enumerate(chars):
-            #char = ord(byte)  # int values
-            for val in (byte >> 4, byte & 15):  # split in 2 nibbles, use shift by 4 and bitewise & 15 to get the values
-                if i == 3:  # the most significant bit of the first nibble day_100 is the flywheel. GOD knows what that means
-                    #set flywheel
-                    mask = 1 << 0
-                    self.flywheel = True if (val & mask) else False
-
-
-                values.append(val)
-        #create a dict from names and nibbles
-        d = dict(zip(names, values))
-
-        #compose year
-        year = d['year_1000'] * 1000 + d['year_100'] * 100 + d['year_10'] * 10 + d['year_1']
-        yday = d['day_100'] * 100 + d['day_10'] * 10 + d['day_1']
-        month, day = utils.get_month_day(year, yday, True)
-        hour = d['hour_10'] * 10 + d['hour_1']
-        minute = d['min_10'] * 10 + d['min_1']
-        second = d['sec_10'] * 10 + d['sec_1']
-        milisecond = d['msec_100'] * 100 + d['msec_10'] * 10 + d['msec_1']
-        return datetime.datetime(year, month, day, hour, minute, second, milisecond*1000)
+        chars = struct.pack('>2I', w1 & 0xFFFFFFFF, w2 & 0xFFFFFFFF)
+        for val in (chars[3] >> 4, chars[3] & 15):
+            # the most significant bit of the first nibble day_100 is the flywheel. GOD knows what that means
+            self.flywheel = True if (val & 1) else False
+        return utils.bcd_words_to_datetime(w1, w2)
 
 
     def gatt(self, k, floatblock, intblock, wa, te):
