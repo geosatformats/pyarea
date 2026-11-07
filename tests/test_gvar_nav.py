@@ -168,3 +168,33 @@ def test_full_image_is_fast(case):
     elapsed = time.perf_counter() - start
     assert lat.shape == lines.shape
     assert elapsed < 10, f"{lines.size} points took {elapsed:.1f} s"
+
+
+# IMC active and IMC off take different paths through the constructor; the second is not exercised by real files here
+# so both are compared with an independent port of VisAD's GVARnav.java, with the IMC flag cleared for the second.
+@pytest.mark.parametrize("imc_off", [False, True])
+@pytest.mark.parametrize("name", ["goes8_gvar_nav.json", "goes13_gvar_nav.json"])
+def test_to_latlon_matches_visad_port(name, imc_off):
+    from tests.visad_gvarnav_reference import Ref
+
+    rec = load(name)
+    words = list(rec["nav_words"])
+    if imc_off:
+        words[2] &= ~(1 << 7)  # IMCFLG: clear the "IMC active" bit
+    nav = make_nav(dict(rec, nav_words=words))
+    ref = Ref(words, rec["byte_order"])
+    assert nav.imc == ref.imc == (1 if imc_off else 0)
+    if imc_off:
+        assert nav.ts == pytest.approx(ref.ts, abs=1e-6)  # minutes from the orbit epoch to the image time
+    compared = 0
+    for line in np.linspace(100, 1500, 6):
+        for elem in np.linspace(100, 3000, 6):
+            image_line, image_elem = nav._area_to_image(line, elem)
+            lat, lon = nav.to_latlon(np.array(line), np.array(elem))
+            ref_lat, ref_lon = ref.to_latlon(float(image_line), float(image_elem))
+            assert np.isnan(lat) == np.isnan(ref_lat)
+            if np.isfinite(lat):
+                assert lat == pytest.approx(ref_lat, abs=1e-4)
+                assert lon == pytest.approx(ref_lon, abs=1e-4)
+                compared += 1
+    assert compared > 20

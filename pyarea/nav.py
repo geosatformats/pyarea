@@ -605,7 +605,7 @@ class GVARNav(AreaNav):
             offset = 1
             if li > self.CUTOF1: offset = 13
             if li > self.CUTOF2: offset = 31
-            for j in range(li, ui):
+            for j in range(li, ui + 1):  # RELLST bounds are inclusive, as in VisAD
 
                 if (j ==  13 or j == 60 or (j - 7) % 55 == 0) and j != 7:
                     rparms[j+offset] = navblock[j+offset] / 100.
@@ -646,16 +646,19 @@ class GVARNav(AreaNav):
         #but hey, python has all this figured out through timedelta
 
         year = 1900 + navblock[self.IMGDAY] // 1000
-        day = navblock[self.IMGDAY] - navblock[self.IMGDAY] / 1000 * 1000
-        hour = int(rparms[self.IMGTM] / 10000)
-        minuts = int(rparms[self.IMGTM] / 100 - hour * 100)
-        secs = rparms[self.IMGTM] - float(100 * minuts) - float(10000 * hour)
+        day = navblock[self.IMGDAY] - navblock[self.IMGDAY] // 1000 * 1000
+        # VisAD: rparms[IMGTM] = (float) iparms[IMGTM] / 1000.f, then integer arithmetic on its integer part
+        rparms[self.IMGTM] = np.float32(navblock[self.IMGTM]) / np.float32(1000.)
+        hhmmss = int(rparms[self.IMGTM])
+        hour = hhmmss // 10000
+        minuts = hhmmss // 100 - hour * 100
+        secs = float(rparms[self.IMGTM] - np.float32(100 * minuts) - np.float32(10000 * hour))
 
 
 
 
 
-        j = day + 1461 * (year + 4799) / 4 - 3 * ((year + 4899) / 100) / 4 - 2465022
+        j = day + 1461 * (year + 4799) // 4 - 3 * ((year + 4899) // 100) // 4 - 2465022
 
         imgtim = float( j * 1440. + hour * 60. + minuts + (secs / 60.))
 
@@ -678,7 +681,7 @@ class GVARNav(AreaNav):
 
 
         diff1 = bcdtime - jan_1_1950
-        epoch1 = diff1.total_seconds()/60.
+        epoch = diff1.total_seconds()/60.  # orbit and attitude epoch, minutes since 1950-01-01
 
 
         self.imc = 0 if ( (navblock[self.IMCACT] & (1 << self.IMCFLG)) != 0 ) else  1
