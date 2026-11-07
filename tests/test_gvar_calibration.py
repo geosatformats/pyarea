@@ -37,6 +37,14 @@ def test_gould_round_trip(value):
     assert utils.gould2native(to_gould(value)) == pytest.approx(value, rel=1e-5)
 
 
+@pytest.mark.parametrize(("word", "value"), [
+    (3201977607, -2.3561944),  # the worked example of the OGE document (BD DA 4D 07), also in the docstring
+    (0x41100000, 1.0), (0x41100001, 1.0 + 2 ** -20), (0xBEF00000, -1.0), (0x00000000, 0.0), (0x80000000, 0.0)])
+def test_gould_known_values(word, value):
+    """Words with known values, independent of the encoder used by the round-trip test above."""
+    assert utils.gould2native(word) == pytest.approx(value, rel=1e-7, abs=0)
+
+
 VIS_BIAS, VIS_G1, VIS_G2, RAD_TO_ALB = -0.5, 0.01, 1.5, 0.002
 IR_GAIN, IR_BIAS = 0.2, -1.0
 
