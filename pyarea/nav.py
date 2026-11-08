@@ -117,8 +117,8 @@ class AreaNav():
     RAD = PI / 180.  # degrees to radians conversion pi/180
     STTYPE = 0  # word position of satellite type
 
-    #java project uses makeAreaNav factory static method. I prefer different alternative,
-    #to use __new__()
+    # VisAD builds these with the static AREAnav.makeAreaNav, which switches on the first nav word.
+    # Here AreaNav(navblock=..., byte_order=..., int_format=...) picks the subclass named <nav type>Nav in the same way.
     def __new__(cls, *args, **kwargs):
         if not 'navblock' in kwargs:
             raise RuntimeError('Can not create {} instance without a navigation block'.format( cls.__name__))
@@ -151,7 +151,7 @@ class AreaNav():
 
         # dynamically create the new class
         for klass in nav_classes:
-            if cls is not AreaNav or klass.__name__.startswith(navtype.strip()):
+            if cls is not AreaNav or klass.__name__ == navtype.strip() + 'Nav':
                 inst = object.__new__(klass)
                 inst.navtype = navtype
                 inst.byte_order = byte_order
@@ -679,19 +679,10 @@ class GVARNav(AreaNav):
         imgtim = float( j * 1440. + hour * 60. + minuts + (secs / 60.))
 
 
-        #sdt = '%4d-%02d-%02d %02d:%02d:%0.2f' % (year, month, mday, hour, minuts, secs)
-        #self.scan_datetime = datetime.datetime.strptime(sdt, '%Y-%m-%d %H:%M:%S.%f')
-        self.scan_datetime = None
-
+        # the epoch is decoded below, in minutes since 1950-01-01 like imgtim. imgtim follows VisAD (a float
+        # holding hhmmss.mmm, as the word counts milliseconds); decoding the day and time words with
+        # utils.yyyddd_hhmmss2datetime would differ by up to 0.016 s from that float.
         jan_1_1950 = datetime.datetime(1950, 1, 1)
-        '''
-        my version of imgtime in minutres is not quite the same like the java code so i use that one
-
-        imgtime = utils.yyyddd_hhmmss2datetime(navblock[self.IMGDAY], navblock[self.IMGTM])
-
-        diff = imgtime - jan_1_1950
-        imgtim1 = diff.total_seconds()/60.
-        '''
         bcdtime = utils.bcd_words_to_datetime(navblock[self.ETIME], navblock[self.ETIME+1])
 
 
@@ -1002,7 +993,7 @@ class GVARNav(AreaNav):
 
 class LALONav(AreaNav):
     def __init__(self, navblock=None, auxblock=None, **kwargs):
-        pass
+        raise NotImplementedError('LALO (latitude/longitude grid) navigation is not implemented')
 
 
 # the nav block of a "GOES" file starts with the 4 ASCII bytes of the nav type code AreaNav already defines
@@ -1808,7 +1799,7 @@ class GMSXNav(AreaNav):
 
         navtype = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=4, format_str='s'),
                       struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str=self.int_format),navblock[self.STTYPE]))[0]
-        if navtype != self.GMSX:
+        if navtype.decode(errors='replace') != self.GMSX:
             raise Exception(f'Invalid navigation type {navtype}')
 
 
@@ -1817,7 +1808,7 @@ class GMSXNav(AreaNav):
         #I will use a completely different approach, numpy based
         #convert the string MORE to a integer
         #excluded_value = struct.unpack('>1i',struct.pack('>4s', 'MORE'))[0]
-        excluded_value = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str=self.int_format),struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=4, format_str='s'), 'MORE'))[0]
+        excluded_value = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str=self.int_format),struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=4, format_str='s'), b'MORE'))[0]
 
         #convert initial nav block to numpy array
         navblock_array = np.array(navblock, dtype=np.int64)
@@ -1878,7 +1869,7 @@ class GMSXNav(AreaNav):
         sm = sum(unsigned_byte_array*pows)/(10**mult_pow)
         if negative:
             sm= -sm
-        return np.asscalar(sm)
+        return float(sm)
 
     @staticmethod
     def normalize_lon(lon=None, lon_range=180):
@@ -3123,13 +3114,4 @@ class GMSXNav(AreaNav):
 class ABINNav(AreaNav):
 
     def __init__(self, navblock=None, auxblock=None, **kwargs):
-        self.loff = navblock[1] / 100000000.0;
-        self.coff = navblock[2] / 100000000.0;
-        self.lfac = navblock[3] / 100000000.0;
-        self.cfac = navblock[4] / 100000000.0;
-        self.plon = navblock[5] / 10.0;
-        self.bres = navblock[6];
-
-
-
-
+        raise NotImplementedError('ABIN (GOES-R ABI fixed grid) navigation is not implemented')
