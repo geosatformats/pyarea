@@ -24,15 +24,19 @@ Copyright 2017 Ioan Ferencik, Solargis s.r.0 & Kin Largadas
 
 This library is a Python port of edu.wisc.ssec.mcidas. Copyright 1998 - 2023 
 by Tom Whittaker, Tommy Jasmin, Tom Rink, Don Murray, James Kelly, Bill Hibbard, 
-Dave Glowacki, Curtis Rueden and others. Licensed under the GNU Library General 
-Public License, version 2.0 or later.
+Dave Glowacki, Curtis Rueden and others. 
+
+The original work is licensed under the GNU Library General Public License, version 
+2.0 or later. As permitted under the "or later" clause of the license, this port and 
+all its derived modifications are distributed under the terms of the GNU Lesser 
+General Public License, version 3.0 or later.
 
 This library is free software; you can redistribute it and/or modify it under 
 the terms of the GNU Lesser General Public License as published by the Free 
-Software Foundation; either version 2.1 of the License, or (at your option) any
+Software Foundation; either version 3.0 of the License, or (at your option) any
 later version. You may obtain a copy of the License at:
 
-    https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+    https://www.gnu.org/licenses/lgpl-3.0.html
 
 This library is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
