@@ -324,13 +324,14 @@ class TestNavigation:
             area.get_nadir_sampling()
 
     def test_nav_block_of_another_type(self, mode_a_ir_file):
-        """A nav block of an unknown type gives no navigation."""
+        """A nav block of an unknown type is refused, as VisAD's makeAreaNav does."""
         with open(mode_a_ir_file, "r+b") as f:
             f.seek(DIR_WORDS * 4)
             f.write(b"XXXX")
         area = AreaFile(mode_a_ir_file)
-        assert area.navigation is None
-        with pytest.raises(ValueError, match="no GOES navigation"):
+        with pytest.raises(NotImplementedError, match="XXXX"):
+            area.navigation
+        with pytest.raises(NotImplementedError, match="XXXX"):
             area.get_lonlats()
 
 

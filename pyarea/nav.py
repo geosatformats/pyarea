@@ -156,12 +156,11 @@ class AreaNav():
                 inst.navtype = navtype
                 inst.byte_order = byte_order
                 inst.int_format = int_format
-                return  inst
+                return inst
 
-
-
-        #raise RuntimeError(f'Navigation for {navtype} data is not implemented. Supported implementations are: {str(nav_classes)}')
-
+        # VisAD's makeAreaNav throws a McIDASException here
+        supported = sorted(klass.__name__[:-len('Nav')] for klass in nav_classes)
+        raise NotImplementedError(f'Navigation for {navtype!r} data is not implemented. Supported: {", ".join(supported)}')
 
     def toLatLon(self, linele=None):
         raise RuntimeError('Abstract method. Should be implemented by subclasses')

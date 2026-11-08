@@ -28,7 +28,8 @@ def test_nav_type_selects_the_class(code, klass, order):
 
 @pytest.mark.parametrize("code", ["GVA ", "MSG ", "PS  ", "    ", "ZZZZ", "gvar", 0, -2139062144])
 def test_unknown_nav_types_are_not_matched_by_prefix(code):
-    assert _pick(code) is None
+    with pytest.raises(NotImplementedError, match="not implemented"):
+        _pick(code)
 
 
 def test_the_selection_does_not_depend_on_the_order_of_the_subclasses():

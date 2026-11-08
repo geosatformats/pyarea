@@ -231,19 +231,21 @@ class AreaFile(BytesIO):
 
     @property
     def navigation(self):
-        """The navigation object for this file's nav block, or None if it has none or is of an unsupported type."""
+        """The navigation object for this file's nav block, or None if the file has no nav block.
+
+        Raises ``NotImplementedError`` for a nav block of a type pyarea has no navigation for.
+        """
         if self.areaNav is None and self.nav is not None:
             nav = AreaNav(navblock=self.nav, byte_order=self.directory.byte_order, int_format=self.INTEGER_FORMAT)
-            if nav is not None:
-                nav.setImageStart(self.directory.line_ul, self.directory.element_ul)
-                nav.setRes(*self.resolution)
-                nav.setMag(1, 1)
-                # VisAD's GMSXnav counts AREA lines and elements from 1. Its test also flips the lines, but the
-                # lines of real GMS-5 AREA files already run north to south, so that flip is left out (checked
-                # by overlaying coastlines on a GMS-5 image).
-                first = 1 if isinstance(nav, GMSXNav) else 0
-                nav.setStart(first, first)
-                self.areaNav = nav
+            nav.setImageStart(self.directory.line_ul, self.directory.element_ul)
+            nav.setRes(*self.resolution)
+            nav.setMag(1, 1)
+            # VisAD's GMSXnav counts AREA lines and elements from 1. Its test also flips the lines, but the
+            # lines of real GMS-5 AREA files already run north to south, so that flip is left out (checked
+            # by overlaying coastlines on a GMS-5 image).
+            first = 1 if isinstance(nav, GMSXNav) else 0
+            nav.setStart(first, first)
+            self.areaNav = nav
         return self.areaNav
 
     # ------------------------------------------------------------------
@@ -702,10 +704,6 @@ class AreaFile(BytesIO):
 
         except Exception as e:
                 raise Exception(f'Failed to fetch IMC and FLIP flags from {self.__class__.__name__} object, Error is {e}' )
-    @property
-    def resolution(self):
-        return self.directory.line_res, self.directory.element_res
-
 if __name__ == '__main__':
 
     #import pylab
