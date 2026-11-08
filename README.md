@@ -22,16 +22,17 @@ To get a 2D version.
 
 Copyright 2017 Ioan Ferencik, Solargis s.r.0 & Kin Largadas
 
-A derivative of edu.wisc.ssec.mcidas. Copyright 1998 - 2023 by Tom Whittaker, 
-Tommy Jasmin, Tom Rink, Don Murray, James Kelly, Bill Hibbard, Dave Glowacki, 
-Curtis Rueden and others. Licensed under the GNU Library General Public License.
+This library is a Python port of edu.wisc.ssec.mcidas. Copyright 1998 - 2023 
+by Tom Whittaker, Tommy Jasmin, Tom Rink, Don Murray, James Kelly, Bill Hibbard, 
+Dave Glowacki, Curtis Rueden and others. Licensed under the GNU Library General 
+Public License, version 2.0 or later.
 
 This library is free software; you can redistribute it and/or modify it under 
 the terms of the GNU Lesser General Public License as published by the Free 
-Software Foundation; either version 3 of the License, or (at your option) any
+Software Foundation; either version 2.1 of the License, or (at your option) any
 later version. You may obtain a copy of the License at:
 
-    https://www.gnu.org/licenses/lgpl-3.0.en.html
+    https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
 
 This library is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
