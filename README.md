@@ -1,7 +1,7 @@
 # Pyarea
 
-Pyarea is a Python package to read data from the GOES VISSR, VAS and/or
-GVAR instruments onboard GOES satellites in McIDAS AREA format.
+Pyarea is a Python package to read data from the VISSR, VAS and/or GVAR 
+instruments onboard the GOES satellites in McIDAS AREA format.
 
 A python port of the edu.wisc.ssec.mcidas Java package, it mostly mimics
 its structure and logic with a few exceptions imposed by practical aspects
@@ -26,15 +26,15 @@ This library is a Python port of edu.wisc.ssec.mcidas. Copyright 1998 - 2023
 by Tom Whittaker, Tommy Jasmin, Tom Rink, Don Murray, James Kelly, Bill Hibbard, 
 Dave Glowacki, Curtis Rueden and others. 
 
-The original work is licensed under the GNU Library General Public License, version 
-2.0 or later. As permitted under the "or later" clause of the license, this port and 
-all its derived modifications are distributed under the terms of the GNU Lesser 
-General Public License, version 3.0 or later.
+The original work is licensed under the GNU Library General Public License, 
+version 2.0 or later. As permitted in the "or later" clause of the license, 
+this port and all its derived modifications are distributed under the terms of 
+the GNU Lesser General Public License, version 3.0 or later.
 
 This library is free software; you can redistribute it and/or modify it under 
 the terms of the GNU Lesser General Public License as published by the Free 
-Software Foundation; either version 3.0 of the License, or (at your option) any
-later version. You may obtain a copy of the License at:
+Software Foundation; either version 3.0 of the License, or (at your option) 
+any later version. You may obtain a copy of the License at:
 
     https://www.gnu.org/licenses/lgpl-3.0.html
 
