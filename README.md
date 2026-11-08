@@ -16,7 +16,7 @@ The AreaFile can be instantiated from a file or a binary string:
 
 The AreaFile is lightweight, and features lazy initialization (reads the
 data only upon request). The data returns a 3D numpy array; use squeeze
-To get a 2D version.
+to get a 2D version.
 
 ## License
 
