@@ -146,11 +146,11 @@ def test_flipped_lines_round_trip(case):
     line, elem = nav.to_lin_ele(lat, lon)
     assert line[0, 0] == pytest.approx(line_in, abs=1e-3)
     assert elem[0, 0] == pytest.approx(1800.0, abs=1e-3)
-    # the base class's array helper must agree with the scalar one
-    base_line, base_elem = nav.imageCoordToAreaCoord_np(linele=[np.array([2900.0]), np.array([9100.0])])
-    scalar = nav.imageCoordToAreaCoord([[9100.0], [2900.0]])
-    assert base_line[0] == pytest.approx(scalar[nav.indexLine][0])
-    assert base_elem[0] == pytest.approx(scalar[nav.indexEle][0])
+    # the base class's array helper must agree with the list one
+    base_line, base_elem = nav._image_to_area(np.array([2900.0]), np.array([9100.0]))
+    listed = nav.imageCoordToAreaCoord([[9100.0], [2900.0]])
+    assert base_line[0] == pytest.approx(listed[nav.indexLine][0])
+    assert base_elem[0] == pytest.approx(listed[nav.indexEle][0])
 
 
 def test_full_image_is_fast(case):

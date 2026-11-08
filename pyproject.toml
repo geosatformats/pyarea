@@ -27,3 +27,8 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# the projection modules use the (l, c) names of the HRIT and CGMS documents, also as keyword arguments, and have not
+# been reworked yet
+"pyarea/navigation/*" = ["E741", "E501", "E402"]

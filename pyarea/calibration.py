@@ -1,8 +1,6 @@
 __author__ = 'jano'
-import math
 
 import numpy as np
-from numpy import nan
 
 from pyarea import utils
 from pyarea.sensors import get_sensor
@@ -473,7 +471,7 @@ class G10GVARCalibrator(GVARCalibrator):
 # Pre-GVAR (SMS/GOES-1..7 VISSR/VAS) calibration.
 
 class GOESCalibrator(Calibrator):
-    """Calibration of the pre-GVAR GOES (SMS/GOES-1 to 7) VISSR and VAS data, the counterpart of :class:`GVARCalibrator`.
+    """Calibration of the pre-GVAR GOES (SMS/GOES-1 to 7) VISSR and VAS data, like :class:`GVARCalibrator` for GVAR.
 
     Three kinds of file need three calibrations, and each needs different parts of the file, so unlike
     :class:`GVARCalibrator` this class has no per-file state: the calibrations are static methods that take the

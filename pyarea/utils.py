@@ -1,7 +1,9 @@
-import numpy as np
+import ctypes as C
 import datetime
 import struct
-import ctypes as C
+
+import numpy as np
+
 #binary values representing a missing value in McIDAS
 MCMISSING = int('0x80808080', 16)
 
@@ -66,7 +68,8 @@ def yyyddd_hhmmss2datetime(yyyddd, hhmmss ):
 def timdif(yrday1, hms1, yrday2, hms2):
     """Minutes from the first date and time to the second, as McIDASUtil.timdif.
 
-    The days are YYDDD or YYYYDDD, counted from 1900 as in a directory (see ``yyyddd_hhmmss2datetime``), the times HHMMSS.
+    The days are YYDDD or YYYYDDD, counted from 1900 as in a directory (see ``yyyddd_hhmmss2datetime``),
+    the times HHMMSS.
     """
     first = yyyddd_hhmmss2datetime(yrday1, hms1)
     second = yyyddd_hhmmss2datetime(yrday2, hms2)
@@ -101,7 +104,8 @@ def gould2native(number):
         #the input is an 4 byte int of a hexadecimal float in Gould format
         #we need to prepare byte masks in order to extract the most significant byte (byte 4)
         # as well the first three bytes. I am not sure but my feeling is that OGE doc implies Gould is
-        #big endian byte order and thus the section 3.5.4 labels bytes in an opposite way (byte1 is the most significant byte)
+        #big endian byte order and thus the section 3.5.4 labels bytes in an opposite way
+        #(byte1 is the most significant byte)
         #however the nav header is in Little endian and I use its labeling for bytes
         #prepare masks
         byte012_mask = int('0xffffff',16) # 0000 0000 1111 1111 1111 1111 1111 1111
@@ -144,7 +148,8 @@ def leapyear(year):
     return 366 - ((year % 4) + 3) // 4
 
 
-_field_names_ = names = 'year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1'
+_field_names_ = names = ('year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10',
+                         'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1')
 
 _field_types_ = [C.c_uint8]* len(_field_names_)
 class BCDDateTime(C.BigEndianStructure, ):

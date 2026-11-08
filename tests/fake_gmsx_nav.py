@@ -1,4 +1,5 @@
-"""Builds a GMSX navigation block (a GMS-5 like geometry) for tests, by encoding the values the way sv0100 reads them."""
+"""Builds a GMSX navigation block (a GMS-5 like geometry) for tests, encoding the values the way sv0100 reads them."""
+
 import math
 
 DTIMS = 50000.0  # MJD of the start of the scan
@@ -6,37 +7,47 @@ DTIMS = 50000.0  # MJD of the start of the scan
 
 def _put(stream, offset, nbytes, power, value):
     """Store ``value`` as the sign and magnitude integer ``value * 10**power`` in ``nbytes`` big endian bytes."""
-    magnitude = int(round(abs(value) * 10.0 ** power))
+    magnitude = int(round(abs(value) * 10.0**power))
     assert magnitude < 1 << (8 * nbytes - 1), (offset, value)
     raw = bytearray(magnitude.to_bytes(nbytes, "big"))
     if value < 0:
         raw[0] |= 0x80
-    stream[offset:offset + nbytes] = raw
+    stream[offset : offset + nbytes] = raw
 
 
 def _to_words(stream):
     """Spread the byte stream over the 640 words of the block, as GMSXnav's constructor reads it back."""
+
     def word(chunk):
         return int.from_bytes(chunk, "big", signed=True)
 
     words = [0] * 640
     words[0] = word(b"GMSX")
     for i in range(126):
-        words[1 + i] = word(stream[4 * i:4 * i + 4])
+        words[1 + i] = word(stream[4 * i : 4 * i + 4])
     position = 504
     for block in range(4):
         start = 128 + 127 * block + block  # 128, 256, 384, 512
         for i in range(127):
-            words[start + i] = word(stream[position:position + 4])
+            words[start + i] = word(stream[position : position + 4])
             position += 4
     for marker in (127, 255, 383, 511, 639):
         words[marker] = word(b"MORE")
     return tuple(words)
 
 
-def make_gmsx_navblock(beta0=math.radians(319.96), beta_slope=math.radians(-10.0), sublon=140.0, sat_lon=140.0,
-                       spin_rpm=100.0, sun_ra=0.04, sun_ra_rate=-10.0, sun_dec=5.0, gst0=358.8,
-                       attitude=(0.001, 0.0015)):
+def make_gmsx_navblock(
+    beta0=math.radians(319.96),
+    beta_slope=math.radians(-10.0),
+    sublon=140.0,
+    sat_lon=140.0,
+    spin_rpm=100.0,
+    sun_ra=0.04,
+    sun_ra_rate=-10.0,
+    sun_dec=5.0,
+    gst0=358.8,
+    attitude=(0.001, 0.0015),
+):
     """A navigation block with GMS-5 like numbers: a visible frame of 10000 lines x 9164 pixels (35 microradians),
     the infrared one a quarter of that, and a scan that starts at DTIMS and takes 12.5 minutes.
 
@@ -55,8 +66,16 @@ def make_gmsx_navblock(beta0=math.radians(319.96), beta_slope=math.radians(-10.0
         put(offset, 4, 8, value)
     for offset, value in ((14, 35e-6), (18, 140e-6)):
         put(offset, 4, 10, value)
-    for offset, value in ((22, 5000.5), (26, 1250.5), (110, 1250.5), (114, 1250.5),
-                          (30, 4582.5), (34, 1145.5), (118, 1145.5), (122, 1145.5)):
+    for offset, value in (
+        (22, 5000.5),
+        (26, 1250.5),
+        (110, 1250.5),
+        (114, 1250.5),
+        (30, 4582.5),
+        (34, 1145.5),
+        (118, 1145.5),
+        (122, 1145.5),
+    ):
         put(offset, 4, 4, value)
     for offset, value in ((38, 4), (42, 2), (46, 10000), (50, 2500), (54, 9164), (58, 2291)):
         put(offset, 4, 0, value)

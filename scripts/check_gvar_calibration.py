@@ -11,7 +11,7 @@ import sys
 
 import numpy as np
 
-from pyarea.calibration import calibrated_unit, cal_type_from_name
+from pyarea.calibration import cal_type_from_name, calibrated_unit
 from pyarea.file import AreaFile
 
 

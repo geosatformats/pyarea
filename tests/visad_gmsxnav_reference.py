@@ -3,6 +3,7 @@
 It follows the Java statement by statement, including the float casts, the (i - 1) in the sub-block offsets and
 the state (sat, sp, ss, sitagt, ...) that mg1100 leaves behind, so it is slow and only meant for comparing.
 """
+
 import math
 
 import numpy as np
@@ -64,9 +65,15 @@ class GMSXRef:
         if iword == 6:
             for i in range(1, 6):
                 tmp[i] = (b[i + off] & 0x7F) + 128 if b[i + off] < 0 else b[i + off]
-            r = ((b[off] & 0x7F) * 2.0 ** 40 + tmp[1] * 2.0 ** 32 + tmp[2] * 16777216.0 + tmp[3] * 65536.0
-                 + tmp[4] * 256.0 + tmp[5])
-        r = r / 10.0 ** ipos
+            r = (
+                (b[off] & 0x7F) * 2.0**40
+                + tmp[1] * 2.0**32
+                + tmp[2] * 16777216.0
+                + tmp[3] * 65536.0
+                + tmp[4] * 256.0
+                + tmp[5]
+            )
+        r = r / 10.0**ipos
         return -r if negative else r
 
     def dec_oa_block(self, form):
@@ -87,9 +94,15 @@ class GMSXRef:
         self.relem[1] = self.relem[2] = self.relem[3] = F(s(4, 0, 58))
         self.vmis = [F(s(4, 10, 62)), F(s(4, 10, 66)), F(s(4, 10, 70))]
         e = self.elmis
-        e[0][0] = F(s(4, 7, 74)); e[1][0] = F(s(4, 10, 78)); e[2][0] = F(s(4, 10, 82))
-        e[0][1] = F(s(4, 10, 86)); e[1][1] = F(s(4, 7, 90)); e[2][1] = F(s(4, 10, 94))
-        e[0][2] = F(s(4, 10, 98)); e[1][2] = F(s(4, 10, 102)); e[2][2] = F(s(4, 7, 106))
+        e[0][0] = F(s(4, 7, 74))
+        e[1][0] = F(s(4, 10, 78))
+        e[2][0] = F(s(4, 10, 82))
+        e[0][1] = F(s(4, 10, 86))
+        e[1][1] = F(s(4, 7, 90))
+        e[2][1] = F(s(4, 10, 94))
+        e[0][2] = F(s(4, 10, 98))
+        e[1][2] = F(s(4, 10, 102))
+        e[2][2] = F(s(4, 7, 106))
         self.subLon = F(s(6, 6, 198))
         self.subLat = F(s(6, 6, 204))
         for i in range(10):
@@ -109,8 +122,10 @@ class GMSXRef:
             o[14][i] = s(6, 8, j + 84)
             o[17][i] = s(6, 8, j + 102)
             o[18][i] = s(6, 8, j + 108)
-            for k, (power, off) in zip(range(19, 28), [(12, 128), (14, 134), (14, 140), (14, 146), (12, 152),
-                                                      (16, 158), (12, 164), (16, 170), (12, 176)]):
+            for k, (power, off) in zip(
+                range(19, 28),
+                [(12, 128), (14, 134), (14, 140), (14, 146), (12, 152), (16, 158), (12, 164), (16, 170), (12, 176)],
+            ):
                 o[k][i] = s(6, power, j + off)
 
     # vector helpers
@@ -197,13 +212,15 @@ class GMSXRef:
         rftl = float(f32(self.rline[lmode] + 0.5))
         rftp = float(f32(self.relem[lmode] + 0.5))
         vmis, elmis = self.vmis, self.elmis
-        sp_ = None
         if mode > 0:
             dLat, dLon = float(f32(rLat)) * CDR, float(f32(rLon)) * CDR
             ee = 2.0 * EF - EF * EF
             en = EA / math.sqrt(1.0 - ee * math.sin(dLat) * math.sin(dLat))
-            stn1 = [en * math.cos(dLat) * math.cos(dLon), en * math.cos(dLat) * math.sin(dLon),
-                    en * (1.0 - ee) * math.sin(dLat)]
+            stn1 = [
+                en * math.cos(dLat) * math.cos(dLon),
+                en * math.cos(dLat) * math.sin(dLon),
+                en * (1.0 - ee) * math.sin(dLat),
+            ]
             rio = float(f32(rfcl - math.atan(math.sin(dLat) / (6.610689 - math.cos(dLat))) / rstep))
             rtim = self.dtims + float(f32(rio) / f32(sens)) / 1440.0 / self.dspin
             for _ in range(200):
@@ -223,10 +240,14 @@ class GMSXRef:
                 if tf < 0.0:
                     tp = -tp
                 tl = self.mg1230(self.sp, sl)
-                ri = float(f32(HPAI - tl) / f32(rstep) + f32(rfcl) - f32(vmis[1]) / f32(rstep))  # float arithmetic in Java
+                ri = float(
+                    f32(HPAI - tl) / f32(rstep) + f32(rfcl) - f32(vmis[1]) / f32(rstep)
+                )  # float arithmetic in Java
                 rj = float(f32(tp / rsamp + rfcp + vmis[2] / rsamp - (HPAI - tl) * math.tan(vmis[0]) / rsamp))
                 if abs(ri - rio) >= 1.0:
-                    rtim = (float(np.rint(f32(f32(ri) - f32(1)) / f32(sens))) + float(f32(rj) * f32(rsamp)) / DPAI) / (self.dspin * 1440.0) + self.dtims
+                    rtim = (float(np.rint(f32(f32(ri) - f32(1)) / f32(sens))) + float(f32(rj) * f32(rsamp)) / DPAI) / (
+                        self.dspin * 1440.0
+                    ) + self.dtims
                     rio = ri
                     continue
                 break
@@ -236,7 +257,9 @@ class GMSXRef:
             if ri < 0 or ri > rftl or rj < 0 or rj > rftp:
                 point = [nan, nan]
         if mode < 0:
-            rtim = (float(np.rint(f32(f32(rLin) - f32(1)) / f32(sens))) + float(f32(rPix) * f32(rsamp)) / DPAI) / (self.dspin * 1440.0) + self.dtims
+            rtim = (float(np.rint(f32(f32(rLin) - f32(1)) / f32(sens))) + float(f32(rPix) * f32(rsamp)) / DPAI) / (
+                self.dspin * 1440.0
+            ) + self.dtims
             beta = self.mg1100(rtim)
             sw1 = self.mg1220(self.sp, self.ss)
             sw2 = self.mg1220(sw1, self.sp)

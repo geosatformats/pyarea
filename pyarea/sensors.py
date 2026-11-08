@@ -225,8 +225,9 @@ class Sensor(NamedTuple):
     band: str | None
 
 
-_NAME = re.compile(r"^(?P<platform>.+?) (?P<instrument>visible|infrared|water vapor|imager|sounder|level 2 products)\b(?P<rest>.*)$",
-                   re.IGNORECASE)
+_NAME = re.compile(
+    r"^(?P<platform>.+?) (?P<instrument>visible|infrared|water vapor|imager|sounder|level 2 products)\b(?P<rest>.*)$",
+    re.IGNORECASE)
 
 
 def _parse(name):

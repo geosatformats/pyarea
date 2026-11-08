@@ -1,15 +1,15 @@
 __author__ = 'jano'
 import collections
+import datetime
+import logging
 import math
 import struct
-import logging
-import datetime
+
+import numba
 import numpy as np
 from numpy import nan
 
 from pyarea import utils
-
-import numba
 
 _njit = numba.njit
 
@@ -120,29 +120,24 @@ class AreaNav():
     # VisAD builds these with the static AREAnav.makeAreaNav, which switches on the first nav word.
     # Here AreaNav(navblock=..., byte_order=..., int_format=...) picks the subclass named <nav type>Nav in the same way.
     def __new__(cls, *args, **kwargs):
-        if not 'navblock' in kwargs:
+        if 'navblock' not in kwargs:
             raise RuntimeError('Can not create {} instance without a navigation block'.format( cls.__name__))
-        if not 'byte_order' in kwargs:
-            raise RuntimeError('Can not create {} instance without knowing byte_order. Please supply "byte_order" argument.'.format( cls.__name__))
-        if not 'int_format' in kwargs:
-            raise RuntimeError(
-                'Can not create {} instance without knowing format. Please supply "int_format" argument.'.format(cls.__name__))
+        if 'byte_order' not in kwargs:
+            raise RuntimeError(f'Can not create {cls.__name__} instance without knowing byte_order. '
+                               'Please supply "byte_order" argument.')
+        if 'int_format' not in kwargs:
+            raise RuntimeError(f'Can not create {cls.__name__} instance without knowing format. '
+                               'Please supply "int_format" argument.')
 
         navblock= kwargs.get('navblock')
 
 
         byte_order= kwargs.get('byte_order')
         int_format= kwargs.get('int_format')
-        #navtype = struct.unpack('<4s', struct.pack('<i', navblock[0]))[0]
-        #navtype = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=byte_order, size=4,format_str='s'), navblock[:4])[0]
-        navtype = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=byte_order, size=4, format_str='s'),
-                      struct.pack('{byte_order:s}{format_str:s}'.format(byte_order=byte_order, format_str=int_format),
-                                  navblock[0]))[0]
-        #navtype = .from_bytes(navblock[:4])
+        navtype = struct.unpack(f'{byte_order}4s', struct.pack(f'{byte_order}{int_format}', navblock[0]))[0]
         navtype = navtype.decode(errors='replace')
 
         #evaluate dynamically, does have the advantage of being self updateable
-        #nav_classes = [klass.code_string() for name, klass in globals().items() if 'nav' in name.lower() and issubclass(klass, AreaNav)]
         # a concrete subclass is built directly (its __init__ validates the block);
         # only AreaNav itself has to find the right subclass from the nav type
         nav_classes = cls.get_subclasses() if cls is AreaNav else [cls]
@@ -160,7 +155,8 @@ class AreaNav():
 
         # VisAD's makeAreaNav throws a McIDASException here
         supported = sorted(klass.__name__[:-len('Nav')] for klass in nav_classes)
-        raise NotImplementedError(f'Navigation for {navtype!r} data is not implemented. Supported: {", ".join(supported)}')
+        raise NotImplementedError(f'Navigation for {navtype!r} data is not implemented. '
+                                  f'Supported: {", ".join(supported)}')
 
     def toLatLon(self, linele=None):
         raise RuntimeError('Abstract method. Should be implemented by subclasses')
@@ -168,58 +164,41 @@ class AreaNav():
     def toLinEle(self, latlon=None):
         raise RuntimeError('Abstract method. Should be implemented by subclasses')
 
-    def areaCoordtoImageCoord_np(self, linele=None):
-        c, l = linele
-        l1 =  self.lineOffset - l if self.isLineFlipped else l
-        l1 = self.startImageLine + (self.resLine * (l1 - self.startLine)) / self.magLine
-        c1 = self.startImageElement + (self.resElement * (c - self.startElement)) / self.magElement
-        return [l1, c1]
-
-    def areaCoordtoImageCoord(self, linele=None, newvals = None):
-        l = len(linele[0])
+    def areaCoordtoImageCoord(self, linele=None, newvals=None):
+        """AREAnav.areaCoordToImageCoord: ``[[elements], [lines]]`` of the AREA (file) to the image, NaN stays NaN."""
+        n = len(linele[0])
         if newvals is None:
-            newvals = [[nan for i in range(l)], [nan for i in range(l)]]
+            newvals = [[nan] * n, [nan] * n]
 
-        for i in  range(l):
-            if linele[self.indexLine][i] == linele[self.indexLine][i]:
-                # account for flipped coordinates
-                line  =  self.lineOffset - linele[self.indexLine][i] if self.isLineFlipped else linele[self.indexLine][i]
-                #print 'line %s startImageLine %s startLine %s resLine %s magLine %s' % (line, self.startImageLine, self.startLine, self.resLine, self.magLine)
-                newvals[self.indexLine][i] = self.startImageLine + (self.resLine * (line - self.startLine)) / self.magLine
-
-            if linele[self.indexEle][i] == linele[self.indexEle][i]:
-                #print 'elem %s startImageElement %s startElement %s resElement %s magElement %s' % (linele[self.indexEle][i], self.startImageElement, self.startElement, self.resElement, self.magElement)
-                newvals[self.indexEle][i] = self.startImageElement + (self.resElement * (linele[self.indexEle][i] - self.startElement)) / self.magElement
-
-
+        for i in range(n):
+            line, elem = linele[self.indexLine][i], linele[self.indexEle][i]
+            if line == line:
+                if self.isLineFlipped:  # account for flipped coordinates
+                    line = self.lineOffset - line
+                newvals[self.indexLine][i] = (self.startImageLine
+                                              + (self.resLine * (line - self.startLine)) / self.magLine)
+            if elem == elem:
+                newvals[self.indexEle][i] = (self.startImageElement
+                                             + (self.resElement * (elem - self.startElement)) / self.magElement)
         return newvals
 
-
-    def imageCoordToAreaCoord(self, linele=None, newvals = None):
-        l = len(linele[0])
+    def imageCoordToAreaCoord(self, linele=None, newvals=None):
+        """AREAnav.imageCoordToAreaCoord: the inverse of :meth:`areaCoordtoImageCoord`."""
+        n = len(linele[0])
         if newvals is None:
-            newvals = [[nan for i in range(l)], [nan for i in range(l)]]
+            newvals = [[nan] * n, [nan] * n]
 
-        for i in range(l):
-            if linele[self.indexLine][i] == linele[self.indexLine][i]:
-                newvals[self.indexLine][i] = self.startLine + ( self.magLine * (linele[self.indexLine][i] - self.startImageLine)) / self.resLine
-            # account for flipped coordinates
-                if self.isLineFlipped:
-                    newvals[self.indexLine][i] =  self.lineOffset - newvals[self.indexLine][i]
-
-            if linele[self.indexEle][i] == linele[self.indexEle][i]:
-                newvals[self.indexEle][i] = self.startElement + ( self.magElement * (linele[self.indexEle][i] - self.startImageElement)) / self.resElement
+        for i in range(n):
+            line, elem = linele[self.indexLine][i], linele[self.indexEle][i]
+            if line == line:
+                area_line = self.startLine + (self.magLine * (line - self.startImageLine)) / self.resLine
+                if self.isLineFlipped:  # account for flipped coordinates
+                    area_line = self.lineOffset - area_line
+                newvals[self.indexLine][i] = area_line
+            if elem == elem:
+                newvals[self.indexEle][i] = (self.startElement
+                                             + (self.magElement * (elem - self.startImageElement)) / self.resElement)
         return newvals
-
-
-    def imageCoordToAreaCoord_np(self, linele=None):
-        l, c = linele
-        l1 = self.startLine + ( self.magLine * (l - self.startImageLine)) / self.resLine
-        if self.isLineFlipped:
-            l1 = self.lineOffset - l1
-        c1 = self.startElement + ( self.magElement * (c - self.startImageElement)) / self.resElement
-
-        return [l1,c1]
 
     def canApproximateWithSpline(self):
         return True
@@ -596,9 +575,8 @@ class GVARNav(AreaNav):
         self.aebe4c = float(self.AEBE4)
 
 
-        #navtype = struct.unpack( '<4s', struct.pack('<i', navblock[self.STTYPE]))[0]
-
-        navtype = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=4, format_str='s'), struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str=self.int_format), navblock[self.STTYPE]))[0]
+        navtype = struct.unpack(f'{self.byte_order}4s',
+                                struct.pack(f'{self.byte_order}{self.int_format}', navblock[self.STTYPE]))[0]
         navtype = navtype.decode()
 
         if  navtype != self.GVAR:
@@ -609,8 +587,8 @@ class GVARNav(AreaNav):
         #convert to float, no Gould bullshit like in C, just int to float, same order of course
 
         for i in range(self.MXCDSZ):
-            #rparms[i] = struct.unpack('<f', struct.pack('<i', navblock[i]))[0]
-            rparms[i] = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str='f'), struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str=self.int_format), navblock[i]))[0]
+            rparms[i] = struct.unpack(f'{self.byte_order}f',
+                                      struct.pack(f'{self.byte_order}{self.int_format}', navblock[i]))[0]
 
 
 
@@ -618,8 +596,10 @@ class GVARNav(AreaNav):
         for i, e in enumerate(self.RELLST):
             li, ui = e
             offset = 1
-            if li > self.CUTOF1: offset = 13
-            if li > self.CUTOF2: offset = 31
+            if li > self.CUTOF1:
+                offset = 13
+            if li > self.CUTOF2:
+                offset = 31
             for j in range(li, ui + 1):  # RELLST bounds are inclusive, as in VisAD
 
                 if (j ==  13 or j == 60 or (j - 7) % 55 == 0) and j != 7:
@@ -744,7 +724,8 @@ class GVARNav(AreaNav):
             self.lam = self.lam + rparms[self.LDR1] + (rparms[self.LDR2] + rparms[self.LDR3] * w) * w \
                         + (rparms[self.LDR10] * sw1 + rparms[self.LDR11] * cw1 + rparms[self.LDR4] * sw \
                         + rparms[self.LDR5] * cw + rparms[self.LDR6] * s2w + rparms[self.LDR7] * c2w \
-                        + rparms[self.LDR8] * sw3 + rparms[self.LDR9] * cw3 + w * (rparms[self.LDR12] * sw + rparms[self.LDR13] * cw)) * 2.
+                        + rparms[self.LDR8] * sw3 + rparms[self.LDR9] * cw3
+                        + w * (rparms[self.LDR12] * sw + rparms[self.LDR13] * cw)) * 2.
 
             # computes change in radial distance from the reference (km)
             self.dr = self.dr + rparms[self.RDDR1] + rparms[self.RDDR2] * cw + rparms[self.RDDR3] * sw \
@@ -822,14 +803,19 @@ class GVARNav(AreaNav):
         self.q3 = self.xs[0] * self.xs[0] + self.xs[1] * self.xs[1] + self.aebe2c * self.xs[2] * self.xs[2] - 1.0
 
         # computes the attitudes and misalignments if imc is off
-        if self.imc != 0: # computes the solar orbit angle
-            wa = rparms[61-1] * self.ts  # computes the difference between current time, ts, and the  # exponential time, iparms(62). note that both times are since epoch.
-            te = self.ts - rparms[self.EXPTIM]  # computes roll + roll misalignment
-            self.roll = self.roll + self.gatt(self.RAAWDS, rparms, navblock, wa, te)  # computes pitch + pitch misalignment
-            self.pitch = self.pitch + self.gatt(self.PAAWDS, rparms, navblock, wa, te)  # computes yaw
-            self.yaw = self.yaw + self.gatt(self.YAAWDS, rparms, navblock, wa, te)  # computes roll misalignment
-            self.rma = float(self.gatt(self.RMAWDS, rparms, navblock, wa, te))# computes pitch misalignment
-            self.pma = float(self.gatt(self.PMAWDS, rparms, navblock, wa, te)) # apply the earth sensor compensation if needed
+        if self.imc != 0:
+            # the solar orbit angle
+            wa = rparms[61-1] * self.ts
+            # the difference between the current time, ts, and the exponential time, iparms(62); both times are
+            # since epoch
+            te = self.ts - rparms[self.EXPTIM]
+            # roll, pitch and yaw, with their misalignments
+            self.roll = self.roll + self.gatt(self.RAAWDS, rparms, navblock, wa, te)
+            self.pitch = self.pitch + self.gatt(self.PAAWDS, rparms, navblock, wa, te)
+            self.yaw = self.yaw + self.gatt(self.YAAWDS, rparms, navblock, wa, te)
+            self.rma = float(self.gatt(self.RMAWDS, rparms, navblock, wa, te))
+            self.pma = float(self.gatt(self.PMAWDS, rparms, navblock, wa, te))
+            # the earth sensor compensation, if needed
             self.roll = self.roll + rparms[self.IMCROL]
             self.pitch = self.pitch + rparms[self.IMCPTC]
             self.yaw = self.yaw + rparms[self.IMCYAW]
@@ -879,14 +865,15 @@ class GVARNav(AreaNav):
 
         # computes monomial sinusoids
 
-        for l in range(1, kkk+1):
+        for term in range(1, kkk+1):
 
-            ll = k + 5 * l  # order of sinusoid
+            ll = k + 5 * term  # order of sinusoid
             jr = float(intblock[ll - 4])
 
             # order of monomial sinusoid
             mr = float(intblock[ll - 3])
-            att = att + floatblock[ll - 2] * math.pow((wa - floatblock[ll]), mr) * math.cos(jr * wa + floatblock[ll - 1])
+            att = att + (floatblock[ll - 2] * math.pow((wa - floatblock[ll]), mr)
+                         * math.cos(jr * wa + floatblock[ll - 1]))
 
 
         return att
@@ -966,7 +953,7 @@ class GVARNav(AreaNav):
         return line.reshape(lat.shape), elem.reshape(lat.shape)
 
     def toLatLon(self, linele=None):
-        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
         lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
         return [lat, lon]
 
@@ -1576,7 +1563,7 @@ class GOESNav(AreaNav):
         return self.get_subpoint()
 
     def toLatLon(self, linele=None):
-        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
         lat, lon = self.to_latlon(np.asarray(linele[self.indexLine], dtype=float),
                                   np.asarray(linele[self.indexEle], dtype=float))
         return [lat, lon]
@@ -1732,7 +1719,7 @@ class RECTNav(AreaNav):
         return self._image_to_area(xlin, xele)
 
     def toLatLon(self, linele=None, lon_circular=True):
-        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
         lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle], lon_circular)
         out = [None, None]
         out[self.indexLat], out[self.indexLon] = lat, lon
@@ -2087,7 +2074,7 @@ class GMSXNav(AreaNav):
         return line.reshape(lat.shape), elem.reshape(lat.shape)
 
     def toLatLon(self, linele=None):
-        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
         lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
         return [lat, lon]
 

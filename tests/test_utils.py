@@ -5,7 +5,16 @@ import struct
 import numpy as np
 import pytest
 
-from pyarea.utils import bcd_words_to_datetime, bcdtime2datetime, is_mcmissing, leapyear, mcF2PI, mcPI2F, timdif, yyyddd_hhmmss2datetime
+from pyarea.utils import (
+    bcd_words_to_datetime,
+    bcdtime2datetime,
+    is_mcmissing,
+    leapyear,
+    mcF2PI,
+    mcPI2F,
+    timdif,
+    yyyddd_hhmmss2datetime,
+)
 
 
 @pytest.mark.parametrize(("word", "missing"), [(-2139062144, True), (0x80808080, True), (np.int32(-2139062144), True),
@@ -108,7 +117,8 @@ def test_numpy_integers_are_accepted():
     assert mcPI2F(np.int32(-123456)) == pytest.approx(-mcPI2F(123456))
 
 
-@pytest.mark.parametrize(("year", "days"), [(1996, 366), (1997, 365), (2000, 366), (2016, 366), (2017, 365), (84, 366), (85, 365)])
+@pytest.mark.parametrize(("year", "days"),
+                         [(1996, 366), (1997, 365), (2000, 366), (2016, 366), (2017, 365), (84, 366), (85, 365)])
 def test_leapyear(year, days):
     assert leapyear(year) == days
     assert isinstance(leapyear(year), int)
@@ -118,7 +128,8 @@ def test_leapyear(year, days):
     ("first", "second", "minutes"),
     [((74001, 0), (74001, 0), 0.0), ((74001, 0), (74002, 0), 1440.0), ((96256, 214515), (96256, 214615), 1.0),
      ((74001, 0), (96256, 0), 11937600.0),
-     ((96256, 0), (96255, 0), -1440.0), ((1996256, 0), (96257, 120000), 2160.0), ((116275, 0), (116276, 235959), 2879.98333333)])
+     ((96256, 0), (96255, 0), -1440.0), ((1996256, 0), (96257, 120000), 2160.0),
+     ((116275, 0), (116276, 235959), 2879.98333333)])
 def test_timdif(first, second, minutes):
     assert timdif(*first, *second) == pytest.approx(minutes, abs=1e-6)
 
@@ -127,4 +138,5 @@ def test_year_day_forms_agree_with_mcdaytimetosecs():
     """yyyddd_hhmmss2datetime reads the year like McIDASUtil.mcDayTimeToSecs: ((yearday / 1000) % 1900) + 1900."""
     for yearday in (96256, 1996256, 116275, 2016275):
         year = ((yearday // 1000) % 1900) + 1900
-        assert yyyddd_hhmmss2datetime(yearday, 0) == datetime.datetime(year, 1, 1) + datetime.timedelta(days=yearday % 1000 - 1)
+        assert (yyyddd_hhmmss2datetime(yearday, 0)
+                == datetime.datetime(year, 1, 1) + datetime.timedelta(days=yearday % 1000 - 1))

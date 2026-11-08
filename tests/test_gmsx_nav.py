@@ -1,4 +1,5 @@
 """GMSXNav against an independent scalar port of VisAD's GMSXnav.java, on a made-up GMS-5 like navigation block."""
+
 import numpy as np
 import pytest
 
@@ -7,17 +8,17 @@ from tests.fake_gmsx_nav import make_gmsx_navblock
 from tests.visad_gmsxnav_reference import GMSXRef
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope="module")
 def block():
     return make_gmsx_navblock()
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope="module")
 def nav(block):
-    return AreaNav(navblock=list(block), byte_order='>', int_format='i')
+    return AreaNav(navblock=list(block), byte_order=">", int_format="i")
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope="module")
 def points():
     rng = np.random.default_rng(1)
     return rng.uniform(1, 10000, 200), rng.uniform(1, 9164, 200)
@@ -81,12 +82,12 @@ def test_uses_the_full_circle_not_a_half(nav):
 
 def test_block_with_words_swapped_by_a_little_endian_writer_is_still_read(block, nav):
     def swap(word):
-        word = int.from_bytes((word & 0xFFFFFFFF).to_bytes(4, 'big'), 'little')
+        word = int.from_bytes((word & 0xFFFFFFFF).to_bytes(4, "big"), "little")
         return word - (1 << 32) if word >= 1 << 31 else word
 
     # the type word (index 0) is text and stays as it is; the data words come in swapped
     swapped = [block[0]] + [swap(int(word)) for word in block[1:]]
-    other = AreaNav(navblock=swapped, byte_order='>', int_format='i')
+    other = AreaNav(navblock=swapped, byte_order=">", int_format="i")
     assert other.getSubpoint() == nav.getSubpoint()
     assert other.to_latlon([5000.0], [4582.0])[0][0] == pytest.approx(nav.to_latlon([5000.0], [4582.0])[0][0])
 
@@ -95,8 +96,11 @@ def test_area_file_navigation_counts_from_one_and_does_not_flip(tmp_path, block)
     from pyarea.file import AreaFile
     from tests.fake_area_files import FakeArea, mode_a_data, write_area_file
 
-    area = AreaFile(write_area_file(tmp_path / 'gms.AREA', FakeArea(5, mode_a_data([100]), ul_line=712, ul_element=-415,
-                                                                    line_res=4, elem_res=4)))
+    area = AreaFile(
+        write_area_file(
+            tmp_path / "gms.AREA", FakeArea(5, mode_a_data([100]), ul_line=712, ul_element=-415, line_res=4, elem_res=4)
+        )
+    )
     area.nav = list(block)  # the fake writer only makes 128 word GOES blocks
     area.areaNav = None
     nav = area.navigation

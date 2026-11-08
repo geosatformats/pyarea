@@ -1,18 +1,20 @@
+import logging
+import os
+import struct
 from functools import cached_property
 from io import BytesIO
-from pyarea.directory import DIRECTORY_BYTES, area_directory
+
+import numpy as np
+
 from pyarea.calibration import (
     GOESCalibrator,
     GVARCalibrator,
     cal_type_from_name,
-    calibrated_unit,
 )
+from pyarea.directory import DIRECTORY_BYTES, area_directory
 from pyarea.nav import AreaNav, GMSXNav
 from pyarea.utils import INT32SIZE
-import struct
-import numpy as np
-import os
-import logging
+
 _, name = os.path.split(__file__)
 logger = logging.getLogger(name)
 
@@ -183,7 +185,7 @@ class AreaFile(BytesIO):
                 iinstr = int(instr)
                 if iinstr >= 8:
                     return int(round((self.origNumElements * self.resolution[1]) * 954) / 20834.)
-            except Exception as e:
+            except Exception:
                 pass
 
     @property
@@ -256,7 +258,8 @@ class AreaFile(BytesIO):
 
     @cached_property
     def aaa_cal(self):
-        """The Mode AAA calibration block as ``{"sensor_source", "iab": {channel: (AB1, AB2)}, "ifab": {channel: IFAB}}``.
+        """The Mode AAA calibration block as
+        ``{"sensor_source", "iab": {channel: (AB1, AB2)}, "ifab": {channel: IFAB}}``.
 
         None for any other kind of file, or if the block is too short to be one.
         """
@@ -356,14 +359,16 @@ class AreaFile(BytesIO):
     def read_ir_radiance(self, channel):
         """Mode AAA radiance of a VAS channel as float32, NaN on lines without the channel."""
         if self.aaa_cal is None:
-            raise ValueError(f'{self.source}: there is no Mode AAA calibration block (source type {self.source_type!r}).')
+            raise ValueError(f'{self.source}: there is no Mode AAA calibration block '
+                             f'(source type {self.source_type!r}).')
         lookup = 8 if channel == 13 else channel
         cal = self.aaa_cal
         if lookup not in cal['iab'] or lookup not in cal['ifab']:
             raise ValueError(f'{self.source}: channel {lookup} is not in the calibration block.')
         ab1, ab2 = cal['iab'][lookup]
         counts, present = self.read_channel(channel)
-        return np.where(present[:, None], GOESCalibrator.aaa_radiance(counts, ab1, ab2, cal['ifab'][lookup]), np.nan).astype(np.float32)
+        radiance = GOESCalibrator.aaa_radiance(counts, ab1, ab2, cal['ifab'][lookup])
+        return np.where(present[:, None], radiance, np.nan).astype(np.float32)
 
     def read_ir_temperature_aaa(self, channel):
         """Mode AAA brightness temperature (K) of a VAS channel as float32."""
@@ -502,8 +507,8 @@ class AreaFile(BytesIO):
 
     def save(self, to_file_path=None, compress_level=None):
         """
-        Saves the AreFile to disk. Optionally supply  a sring representing the coverage of  the AreaFile to be incorporated in the name
-        Optiaonally compress to gzip
+        Saves the AreaFile to disk. Optionally supply a string representing the coverage of the AreaFile to be
+        incorporated in the name. Optionally compress to gzip
         :param folder: str, full path to folder where data will be saved
         :param coverage: str, the coverage ex SH, NH for goes images
         :param compress_level: int, if provided  the image will be compressed using gzip and specified compresslevel
@@ -537,13 +542,13 @@ class AreaFile(BytesIO):
 
                 afpz = to_file_path + '.z'
                 with open(to_file_path, 'rb') as f_in, gzip.open(afpz, 'wb', compresslevel=compress_level) as f_out:
-                    for l in f_in:
-                        f_out.write(l)
+                    for chunk in f_in:
+                        f_out.write(chunk)
                 os.remove(to_file_path)
                 return afpz
 
             return  to_file_path
-        except Exception as e:
+        except Exception:
 
             raise
 
@@ -577,7 +582,8 @@ class AreaFile(BytesIO):
 
                 raise Exception('Cannot extract imc anf flip flags  because the image lines have no  documentation ' )
         else:
-            raise  Exception('The Area file was not produced from a GVAR stream. The IMC anf FLIP flags do not apply on this case.')
+            raise Exception('The Area file was not produced from a GVAR stream. '
+                            'The IMC and FLIP flags do not apply in this case.')
 
         import ctypes as C
 
@@ -666,7 +672,6 @@ class AreaFile(BytesIO):
 
 
             mask = self.__datamask__().ravel()
-            data = self.data
 
 
             # #
@@ -691,46 +696,9 @@ class AreaFile(BytesIO):
                 raise Exception('The Area files dodo not have any valid lines as per block0 data form the line prefix')
             aline = valid_lines[0]
             astatus = ISCAN.from_buffer_copy(aline[2:6])
-            return astatus.imc_active, astatus.yaw_flip  # print aline  # BO = self.BYTE_ORDER  # HEADER = [('BlockID', 'B'), ('WordSize', 'B'), ('WordCount', 'H'), ('ProductID', 'H'),  #           ('RepeatFlag', 'B'), ('VersionNumber', 'B'), ('DataValid', 'B'), ('AsciiBin', 'B'),  #           ('SPS_ID', 'B'), ('RangeWord', 'B'), ('BlockCount', 'H'), ('Spares_1', '2B'),  #           ('SPS_Time', '8B'), ('Spares_2', '4B'), ('CRC', 'H')]  #  # HEADER = [(e[0], BO + e[1]) for e in HEADER]  # for i in range(10):  #     # h = np.frombuffer(valid_lines[i,:],dtype=HEADER, count=1, offset=14)  #     # print h['RangeWord'].item()>>4  #     from pygvar.classes import ISCAN  #     b = valid_lines[i, 2:6]  #     a = ISCAN.from_buffer_copy(b)  #     print a.imc_active, a.yaw_flip
+            return astatus.imc_active, astatus.yaw_flip
 
-            # first_line_scandatetime = bcdtime2datetime(bytes=valid_lines[0, 6:14], byte_order=self.BYTE_ORDER)  # last_line_scandatetime = bcdtime2datetime(bytes=valid_lines[-1, 6:14], byte_order=self.BYTE_ORDER)
 
         except Exception as e:
-                raise Exception(f'Failed to fetch IMC and FLIP flags from {self.__class__.__name__} object, Error is {e}' )
-if __name__ == '__main__':
-
-    #import pylab
-    logger = logging.getLogger()
-    logging.basicConfig()
-    logger.setLevel('DEBUG')
-    afp = '/media/d/data/satellite_goes_r/adde/incoming/0000000001.OR_ABI-L1b-RadF-M3C07_G16_s2018166103041000000_e2018166104118000000_c2018166104122000000.area'
-    afpz = '/media/d/data/satellite_goes_r/adde/incoming/0000000001.OR_ABI-L1b-RadF-M3C13_G16_s2018226120048000000_e2018226121125000000_c2018226121129000000.area.z'
-    #afp = '/home/jano/sw/06091408 GOES-13 Imager Complete Thu 09-Jun-2016 1408.VIN'
-
-    with AreaFile(source=afp, lazy=True) as a:
-        logger.info(a)
-    # import gzip
-    # with gzip.open(afpz) as cf:
-    #     with AreaFile(source=cf.read(), lazy=True) as a:
-    #         logger.info(a)
-    #         band = a.directory.bands[0]
-    #         for band in range(1,17):
-    #             band_chunk_start = 1 + (band - 1) * 18
-    #             # band_chunki_start = ninstr_bytes + (band-1)* n_calib_elements*4
-    #             band_chunk_end = band_chunk_start + 18
-    #
-    #             calib_info = a.cal[band_chunk_start:band_chunk_end]
-    #             print (dict(zip(range(1,len(calib_info)+1),calib_info)))
-
-            # for b in a.data:
-            #     pylab.imshow(b)
-            #     pylab.show()
-
-
-
-
-
-
-
-
-
+            raise Exception(f'Failed to fetch IMC and FLIP flags from {self.__class__.__name__} object, '
+                            f'Error is {e}') from e

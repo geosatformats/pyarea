@@ -1,20 +1,16 @@
 import ctypes as C
 import logging
 import os
+import struct
 import typing
 
 import numpy as np
-import sys
+
 from pyarea.sensors import SENSORS, get_sensor
 from pyarea.utils import yyyddd_hhmmss2datetime
 
 _, n = os.path.split(os.path.abspath(__file__))
 logger = logging.getLogger(n)
-
-
-
-import struct
-
 
 # the sensor names indexed by sensor number ("" where a number is not used)
 _SENSOR_NAMES = tuple(SENSORS[n].name if n in SENSORS else "" for n in range(max(SENSORS) + 1))
@@ -120,7 +116,8 @@ class _DirectoryMixin:
 
 
     def __eq__(self, other):
-        return self.nominalTime == other.nominalTime and self.imgbox == other.imgbox and self.byte_depth == other.byte_depth
+        return (self.nominalTime == other.nominalTime and self.imgbox == other.imgbox
+                and self.byte_depth == other.byte_depth)
 
 
     @property
@@ -133,7 +130,8 @@ class _DirectoryMixin:
     def __str__(self):
 
         r = f'\n{"-"*35} \n' \
-            f'{self.sensor} {self.cal_type.decode().strip()} {self.source_type.decode().strip()} image scanned at {self.start_time}\n' \
+            f'{self.sensor} {self.cal_type.decode().strip()} {self.source_type.decode().strip()} '\
+            f'image scanned at {self.start_time}\n' \
             f'{"-"*35}\n' \
             f'Nominal time: {self.nominal_time}\n'\
             f'Bands: {self.bands}\n'\
@@ -144,7 +142,7 @@ class _DirectoryMixin:
             f'Bounding box: {self.imgbox}\n'
 
         if self.comment_cards:
-            r+= f'Comment cards:\n'
+            r+= 'Comment cards:\n'
             for cc in self.comment_cards:
                 r+= f'\t{cc}\n'
         return r
@@ -160,7 +158,7 @@ class _DirectoryMixin:
             try:
                 try:
                     card_name, sval = card_txt.split('=')
-                except Exception as e:
+                except Exception:
                     self.comment_cards.append(str(card_txt))
                     continue
 
@@ -202,7 +200,8 @@ class _DirectoryMixin:
 
     @property
     def id_text(self):
-        return f'{self.sensor} {self.cal_type.decode()} {self.source_type.decode()} image scanned at {self.start_time}\n'
+        return (f'{self.sensor} {self.cal_type.decode()} {self.source_type.decode()} '
+                f'image scanned at {self.start_time}\n')
 
     @property
     def size(self):

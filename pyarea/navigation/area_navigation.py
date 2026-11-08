@@ -1,5 +1,6 @@
 import numpy as np
-from  pyarea.navigation import hrit_navigation as hnav
+
+from pyarea.navigation import hrit_navigation as hnav
 from pyarea.navigation import proj4_navigation as pnav
 
 
