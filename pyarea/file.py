@@ -2,17 +2,10 @@ from functools import cached_property
 from io import BytesIO
 from pyarea.directory import DIRECTORY_BYTES, area_directory
 from pyarea.calibration import (
-    MODE_AA_DELTA_F,
+    GOESCalibrator,
     GVARCalibrator,
     cal_type_from_name,
     calibrated_unit,
-    aaa_radiance,
-    aaa_temperature,
-    mode_a_ir_temperature,
-    mode_aa_code_to_band,
-    mode_aa_temperature,
-    vas_planck_coeffs,
-    vis_unnormalized_reflectance,
 )
 from pyarea.nav import AreaNav, GMSXNav
 from pyarea.utils import INT32SIZE
@@ -370,22 +363,22 @@ class AreaFile(BytesIO):
             raise ValueError(f'{self.source}: channel {lookup} is not in the calibration block.')
         ab1, ab2 = cal['iab'][lookup]
         counts, present = self.read_channel(channel)
-        return np.where(present[:, None], aaa_radiance(counts, ab1, ab2, cal['ifab'][lookup]), np.nan).astype(np.float32)
+        return np.where(present[:, None], GOESCalibrator.aaa_radiance(counts, ab1, ab2, cal['ifab'][lookup]), np.nan).astype(np.float32)
 
     def read_ir_temperature_aaa(self, channel):
         """Mode AAA brightness temperature (K) of a VAS channel as float32."""
-        coeffs = vas_planck_coeffs(self.directory.satellite, channel)
-        return aaa_temperature(self.read_ir_radiance(8 if channel == 13 else channel), coeffs)
+        coeffs = GOESCalibrator.vas_planck_coeffs(self.directory.satellite, channel)
+        return GOESCalibrator.aaa_temperature(self.read_ir_radiance(8 if channel == 13 else channel), coeffs)
 
     def _mode_aa_line_calibration(self, band):
         """Per-line ``(cal_present, delta_f, ysubz)`` for an IR band of a Mode AA file."""
         cal = self.mode_aa_cal
-        match = mode_aa_code_to_band(cal['channel']) == band
+        match = GOESCalibrator.mode_aa_code_to_band(cal['channel']) == band
         cal_present = match.any(axis=1)
         slot = np.where(cal_present, match.argmax(axis=1), 0)
         rows = np.arange(match.shape[0])
         deltaf_code = cal['deltaf_code'][rows, slot]
-        table = np.array(MODE_AA_DELTA_F)
+        table = np.array(GOESCalibrator.MODE_AA_DELTA_F)
         valid = (deltaf_code >= 0) & (deltaf_code < len(table))
         delta_f = np.where(valid, table[np.clip(deltaf_code, 0, len(table) - 1)], 0)
         return cal_present, delta_f, cal['ysubz'][rows, slot].astype(np.float64)
@@ -395,7 +388,7 @@ class AreaFile(BytesIO):
         if self.band_list is None:
             raw = self.read_data().astype(np.float64)
             return raw, np.ones(raw.shape[0], dtype=bool)
-        match = mode_aa_code_to_band(self.band_list) == band
+        match = GOESCalibrator.mode_aa_code_to_band(self.band_list) == band
         present = match.any(axis=1)
         return self._gather_slot(np.where(present, match.argmax(axis=1), 0), present).astype(np.float64), present
 
@@ -410,7 +403,7 @@ class AreaFile(BytesIO):
         cal_present, delta_f, ysubz = self._mode_aa_line_calibration(band)
         raw, raw_present = self._mode_aa_raw_counts(band)
         valid_line = cal_present & raw_present
-        t = mode_aa_temperature(raw, delta_f, ysubz, band)
+        t = GOESCalibrator.mode_aa_temperature(raw, delta_f, ysubz, band)
         return np.where(valid_line[:, None], t, np.nan).astype(np.float32)
 
     def read_ir_temperature_a(self):
@@ -423,7 +416,7 @@ class AreaFile(BytesIO):
         counts = self.read_data()
         if counts.max() > 255:
             raise ValueError(f'{self.source}: raw values exceed 8 bits (max {counts.max()}).')
-        return mode_a_ir_temperature(counts)
+        return GOESCalibrator.mode_a_ir_temperature(counts)
 
     @property
     def gvar_calibrator(self):
@@ -458,7 +451,7 @@ class AreaFile(BytesIO):
         if calibration == 'counts':
             return counts
         if calibration == 'unnormalized_reflectance':
-            return vis_unnormalized_reflectance(counts)
+            return GOESCalibrator.vis_unnormalized_reflectance(counts)
         raise ValueError(f'Unsupported VIS calibration {calibration!r}.')
 
     def get_nadir_sampling(self):
