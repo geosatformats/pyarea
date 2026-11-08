@@ -1820,11 +1820,6 @@ class GMSXNav(AreaNav):
         if words.size < 639:
             raise ValueError(f'A GMSX navigation block has 640 words, not {words.size}')
         pieces = [words[1:127]] + [words[start:start + 127] for start in (128, 256, 384, 512)]
-        # back to the bytes of the file, which is how the orbit and attitude block is laid out
-        data = (np.concatenate(pieces) & 0xFFFFFFFF).astype('>u4').tobytes()
-        self.bParms = np.zeros(3200, dtype=np.uint8)
-        self.bParms[:len(data)] = np.frombuffer(data, dtype=np.uint8)
-
         self.resLin = np.zeros(4, dtype=np.float32)
         self.resEle = np.zeros(4, dtype=np.float32)
         self.rlic = np.zeros(4, dtype=np.float32)
@@ -1836,7 +1831,20 @@ class GMSXNav(AreaNav):
         self.elmis = np.zeros((3, 3), dtype=np.float32)
         self.orbt1 = np.zeros((35, 8), dtype=np.float64)
         self.atit = np.zeros((10, 10), dtype=np.float64)
-        self.decOABlock(form=0)
+        # The block is a stream of bytes the producer wrote, not integers. VisAD takes the bytes of each word most
+        # significant first, which is right when the words were read big endian. Written by a little endian machine
+        # the words come out swapped and the values are nonsense, so the other order is the one to use then.
+        for order in ('>', '<'):
+            data = (np.concatenate(pieces) & 0xFFFFFFFF).astype(order + 'u4').tobytes()
+            self.bParms = np.zeros(3200, dtype=np.uint8)
+            self.bParms[:len(data)] = np.frombuffer(data, dtype=np.uint8)
+            self.decOABlock(form=0)
+            if abs(self.subLat) <= 90.0 and abs(self.subLon) <= 360.0 and 0.0 < self.dspin < 1.0e4:
+                break
+        else:  # nothing plausible (an empty block, say): keep VisAD's reading
+            data = (np.concatenate(pieces) & 0xFFFFFFFF).astype('>u4').tobytes()
+            self.bParms[:len(data)] = np.frombuffer(data, dtype=np.uint8)
+            self.decOABlock(form=0)
 
     def sv01000(self, offset, size, power):
         """Scaled integer R*size.power at ``offset`` of the block: sign and magnitude, big endian, over 10**power."""

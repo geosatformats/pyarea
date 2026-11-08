@@ -77,3 +77,15 @@ def test_list_interface(nav):
 
 def test_uses_the_full_circle_not_a_half(nav):
     assert nav.DPAI == pytest.approx(2 * np.pi)
+
+
+def test_block_with_words_swapped_by_a_little_endian_writer_is_still_read(block, nav):
+    def swap(word):
+        word = int.from_bytes((word & 0xFFFFFFFF).to_bytes(4, 'big'), 'little')
+        return word - (1 << 32) if word >= 1 << 31 else word
+
+    # the type word (index 0) is text and stays as it is; the data words come in swapped
+    swapped = [block[0]] + [swap(int(word)) for word in block[1:]]
+    other = AreaNav(navblock=swapped, byte_order='>', int_format='i')
+    assert other.getSubpoint() == nav.getSubpoint()
+    assert other.to_latlon([5000.0], [4582.0])[0][0] == pytest.approx(nav.to_latlon([5000.0], [4582.0])[0][0])
