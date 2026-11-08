@@ -14,7 +14,7 @@ from pyarea.calibration import (
     vas_planck_coeffs,
     vis_unnormalized_reflectance,
 )
-from pyarea.nav import AreaNav
+from pyarea.nav import AreaNav, GMSXNav
 from pyarea.utils import INT32SIZE
 import struct
 import numpy as np
@@ -238,7 +238,11 @@ class AreaFile(BytesIO):
                 nav.setImageStart(self.directory.line_ul, self.directory.element_ul)
                 nav.setRes(*self.resolution)
                 nav.setMag(1, 1)
-                nav.setStart(0, 0)
+                # VisAD's GMSXnav counts AREA lines and elements from 1. Its test also flips the lines, but the
+                # lines of real GMS-5 AREA files already run north to south, so that flip is left out (checked
+                # by overlaying coastlines on a GMS-5 image).
+                first = 1 if isinstance(nav, GMSXNav) else 0
+                nav.setStart(first, first)
                 self.areaNav = nav
         return self.areaNav
 
