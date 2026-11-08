@@ -967,7 +967,7 @@ class GVARNav(AreaNav):
         return line.reshape(lat.shape), elem.reshape(lat.shape)
 
     def toLatLon(self, linele=None):
-        """Convert ``[[elements], [lines]]`` (file coordinates) to ``[[lats], [lons]]``."""
+        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
         lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
         return [lat, lon]
 
@@ -1577,7 +1577,7 @@ class GOESNav(AreaNav):
         return self.get_subpoint()
 
     def toLatLon(self, linele=None):
-        """Convert ``[[elements], [lines]]`` (file coordinates) to ``[[lats], [lons]]``."""
+        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
         lat, lon = self.to_latlon(np.asarray(linele[self.indexLine], dtype=float),
                                   np.asarray(linele[self.indexEle], dtype=float))
         return [lat, lon]
@@ -1733,7 +1733,7 @@ class RECTNav(AreaNav):
         return self._image_to_area(xlin, xele)
 
     def toLatLon(self, linele=None, lon_circular=True):
-        """Convert ``[[elements], [lines]]`` (file coordinates) to ``[[lats], [lons]]``."""
+        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
         lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle], lon_circular)
         out = [None, None]
         out[self.indexLat], out[self.indexLon] = lat, lon
@@ -1759,1355 +1759,347 @@ class RECTNav(AreaNav):
         return s
 
 
+_CDR = math.pi / 180.0
+_CRD = 180.0 / math.pi
+
+
+_F32 = np.float32
+
+
+def _unit(v):
+    """McIDAS mg1200: the vectors along the first axis scaled to length 1 (the zero vector stays zero)."""
+    length = np.sqrt((v * v).sum(axis=0))
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.where(length == 0.0, 0.0, v / length)
+
+
+def _cross(a, b):
+    """McIDAS mg1210."""
+    return np.cross(a, b, axis=0)
+
+
+def _unit_cross(a, b):
+    """McIDAS mg1220."""
+    return _unit(_cross(a, b))
+
+
+def _angle(a, b):
+    """McIDAS mg1230: the angle between two vectors, 0 for a zero vector."""
+    dot = (a * b).sum(axis=0)
+    squares = (a * a).sum(axis=0) * (b * b).sum(axis=0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        cosine = dot / np.sqrt(squares)
+        cosine = np.where((cosine > 1.0) & (cosine - 1.0 < 0.000001), 1.0, cosine)
+        return np.where(squares == 0.0, 0.0, np.arccos(cosine))
+
+
 class GMSXNav(AreaNav):
+    """Navigation of GMS stretched VISSR data (``GMSX``), a numpy port of the ``GMSXnav`` class of VisAD.
 
+    VisAD ported it from McIDAS' nvxgmsx.dlm. The orbit and attitude block is decoded when the object is made, and
+    ``to_latlon`` and ``to_lin_ele`` work on arrays. Like the Java, they use the visible channel's frame (mode 1):
+    the infrared images of GMS are addressed in the same line and element numbers, at a lower resolution.
+    """
 
+    HPAI = math.pi / 2.0
+    DPAI = math.pi * 2.0
+    EA = 6378136.0
+    EF = 1.0 / 298.257
 
     def __init__(self, navblock=None, auxblock=None, **kwargs):
-        self.bParms = np.zeros((3200), dtype=np.int8)
-        self.subLon = nan
-        self.subLat = nan
-        self.resLin = np.zeros((4,), dtype=np.float32)
-        self.resEle = np.zeros((4,), dtype=np.float32)
-        self.rlic = np.zeros((4,), dtype=np.float32)
-        self.relmfc = np.zeros((4,), dtype=np.float32)
-        self.senssu = np.zeros((4,), dtype=np.float32)
-        self.rline = np.zeros((4,), dtype=np.float32)
-        self.relem = np.zeros((4,), dtype=np.float32)
-        self.vmis = np.zeros((3,), dtype=np.float32)
-        self.elmis = np.zeros((3, 3), dtype=np.float32)
-        self.dtims = 0.
-        self.dspin = 0.
-        self.sitagt = 0.
-        self.sunalp = 0.
-        self.sundel = 0.
-        self.sat = [nan, nan, nan]
-        self.sp = [nan, nan, nan]
-        self.ss = [nan, nan, nan]
-        self.orbt1 = np.zeros((35, 8), dtype=np.float64)
-        self.atit = np.zeros((10, 10), dtype=np.float64)
-
-        self.cdr = math.pi / 180.
-        self.crd = 180. / math.pi
-        self.hpai = math.pi / 2.
-        self. dpai = math.pi / 2.
-        self.ea = 6378136.0
-        self.ef = 1 / 298.257
-
-
-
-
-        navtype = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=4, format_str='s'),
-                      struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str=self.int_format),navblock[self.STTYPE]))[0]
+        navtype = struct.unpack('{byte_order:s}4s'.format(byte_order=self.byte_order),
+                                struct.pack('{byte_order:s}{format_str:s}'.format(byte_order=self.byte_order,
+                                                                                 format_str=self.int_format),
+                                            navblock[self.STTYPE]))[0]
         if navtype.decode(errors='replace') != self.GMSX:
             raise Exception(f'Invalid navigation type {navtype}')
 
+        # the data words are the ones between the text words at the start of each 128 word piece of the block:
+        # words 1 to 126, then 127 words from each of 128, 256, 384 and 512
+        words = np.asarray(navblock, dtype=np.int64)
+        if words.size < 639:
+            raise ValueError(f'A GMSX navigation block has 640 words, not {words.size}')
+        pieces = [words[1:127]] + [words[start:start + 127] for start in (128, 256, 384, 512)]
+        # back to the bytes of the file, which is how the orbit and attitude block is laid out
+        data = (np.concatenate(pieces) & 0xFFFFFFFF).astype('>u4').tobytes()
+        self.bParms = np.zeros(3200, dtype=np.uint8)
+        self.bParms[:len(data)] = np.frombuffer(data, dtype=np.uint8)
 
+        self.resLin = np.zeros(4, dtype=np.float32)
+        self.resEle = np.zeros(4, dtype=np.float32)
+        self.rlic = np.zeros(4, dtype=np.float32)
+        self.relmfc = np.zeros(4, dtype=np.float32)
+        self.senssu = np.zeros(4, dtype=np.float32)
+        self.rline = np.zeros(4, dtype=np.float32)
+        self.relem = np.zeros(4, dtype=np.float32)
+        self.vmis = np.zeros(3, dtype=np.float32)
+        self.elmis = np.zeros((3, 3), dtype=np.float32)
+        self.orbt1 = np.zeros((35, 8), dtype=np.float64)
+        self.atit = np.zeros((10, 10), dtype=np.float64)
+        self.decOABlock(form=0)
 
+    def sv01000(self, offset, size, power):
+        """Scaled integer R*size.power at ``offset`` of the block: sign and magnitude, big endian, over 10**power."""
+        raw = bytes(self.bParms[offset:offset + size])
+        magnitude = int.from_bytes(raw, 'big') & ((1 << (8 * size - 1)) - 1)
+        value = magnitude / 10.0 ** power
+        return -value if raw[0] & 0x80 else value
 
-        #I will use a completely different approach, numpy based
-        #convert the string MORE to a integer
-        #excluded_value = struct.unpack('>1i',struct.pack('>4s', 'MORE'))[0]
-        excluded_value = struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=1, format_str=self.int_format),struct.pack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=4, format_str='s'), b'MORE'))[0]
+    def decOABlock(self, form=0):
+        """Decode the orbit and attitude block (``form`` 0 is the short form, 1 the long one).
 
-        #convert initial nav block to numpy array
-        navblock_array = np.array(navblock, dtype=np.int64)
-        #compute mask by excluding elements whose value == 'MORE'
-        navblock_mask = navblock_array!=excluded_value
-
-        #filter the initial block end exclude first value (GMSX), then convert to list
-        cleaned_navblock = navblock_array[navblock_mask][1:].tolist()
-
-
-
-        #convert back to byte string
-        fmt = '{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=len(cleaned_navblock), format_str=self.int_format)
-        self.strbParms = struct.pack(fmt, *cleaned_navblock)
-        fmt1 = '{byte_order:s}{size:d}{format_str:s}'.format(byte_order=self.byte_order, size=len(cleaned_navblock)*4, format_str='b')
-        #convert to  bytes
-        self.bParms = struct.unpack(fmt1, self.strbParms)
-
-        self.decOABlock(self.bParms, self.strbParms, 0)
-        #int to 4 bytes intToBytes
-        #print struct.unpack('>4b', struct.pack('>1i', 123277))
-
-    @staticmethod
-    def sv01000(byte_str_array=None, mult_pow=None, byte_order=None):
+        The offsets are those of GMSXnav, which counts the sub-blocks from 0 but starts at ``(i - 1) * stride``.
         """
-        Converts a byte string array of a certain length to a float number as per
-        http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-11.html#25566
-        I have not followed a close to Java implementation because it would have been slow
-        Rather than that i used numpy and struct
-        The original Java code can deal with 4 or 6 bytes, this code can deal with arbitrary lenghts
-        The idea ois that given a byte string of a certain length it is converted to a float number
-        by anding &  the most significant byte with 127 '01111111' which is ignoring the most significand bit for BIG endian (it seems the GMSX data is in BIG endian)
-        na then multypling with  2  at the power corresponding to the index of each byte expressed as the maximum number of bits (see pows var)
-        and the summbin this multiplication
-        This implementation is byte order specific which is bad but as the data are just 1 byte  it holds!
-        "The Type column in the tables below shows scaled integers in the format R*M.N. The R indicates real numbers, M is the number of bytes and N is the exponent."
-
-
-        :param byte_str_array: a
-        :param mult_pow:
-        :param byte_order:
-        :return:
-        """
-        size = len(byte_str_array)
-
-        #get unsigned and signed versions
-
-        unsigned_byte_array = np.array(struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=byte_order, size=size,format_str='B'), byte_str_array))
-        signed_byte_array = np.array(struct.unpack('{byte_order:s}{size:d}{format_str:s}'.format(byte_order=byte_order, size=size,format_str='b'), byte_str_array))
-
-        #patch the MSB of the unsigned
-        unsigned_byte_array[0] = unsigned_byte_array[0]&127
-        #print signed_byte_array
-        negative = True if signed_byte_array[0] < 0 else False
-        #the power
-        pows = 2. ** (np.arange(size)[::-1] * 8)
-
-        sm = sum(unsigned_byte_array*pows)/(10**mult_pow)
-        if negative:
-            sm= -sm
-        return float(sm)
-
-    @staticmethod
-    def normalize_lon(lon=None, lon_range=180):
-        rtn = lon % lon_range
-        if rtn <=0:
-            rtn+=lon_range
-        if rtn> lon_range/2.:
-            rtn-=lon_range
-        return rtn
-
-    def decOABlock(self, byte_array, byte_string_array, form):
-        """
-        decode Orbit and Attitude data block
-        :param byte_array:
-        :param form:
-        :return:
-        """
-
-        self.dtims = self.sv01000(byte_string_array[:6], 8, self.byte_order)
-        #print self.dtims
-        self.dspin = self.sv01000(byte_string_array[240:246], 8, self.byte_order)
-        #print self.dspin
-        self.resLin[0] = self.sv01000(byte_string_array[6:10],8, self.byte_order)
-        self.resLin[1] = self.sv01000(byte_string_array[10:14],8, self.byte_order)
-        self.resLin[2] = self.sv01000(byte_string_array[10:14],8, self.byte_order)
-        self.resLin[3] = self.sv01000(byte_string_array[10:14],8, self.byte_order)
-        #print self.resLin
-        self.resEle[0] = self.sv01000(byte_string_array[14:18], 10, self.byte_order)
-        self.resEle[1] = self.sv01000(byte_string_array[18:22], 10, self.byte_order)
-        self.resEle[2] = self.sv01000(byte_string_array[18:22], 10, self.byte_order)
-        self.resEle[3] = self.sv01000(byte_string_array[18:22], 10, self.byte_order)
-        #print self.resEle
-        self.rlic[0] = self.sv01000(byte_string_array[22:26], 4, self.byte_order)
-        self.rlic[1] = self.sv01000(byte_string_array[26:30], 4, self.byte_order)
-        self.rlic[2] = self.sv01000(byte_string_array[110:114], 4, self.byte_order)
-        self.rlic[3] = self.sv01000(byte_string_array[114:118], 4, self.byte_order)
-        #print self.rlic
-        self.relmfc[0] = self.sv01000(byte_string_array[30:34], 4, self.byte_order)
-        self.relmfc[1] = self.sv01000(byte_string_array[34:38], 4, self.byte_order)
-        self.relmfc[2] = self.sv01000(byte_string_array[118:122], 4, self.byte_order)
-        self.relmfc[3] = self.sv01000(byte_string_array[122:126], 4, self.byte_order)
-        #print self.relmfc
-        self.senssu[0] = self.sv01000(byte_string_array[38:42], 0, self.byte_order)
-        self.senssu[1] = self.sv01000(byte_string_array[42:46], 0, self.byte_order)
-        self.senssu[2] = self.sv01000(byte_string_array[42:46], 0, self.byte_order)
-        self.senssu[3] = self.sv01000(byte_string_array[42:46], 0, self.byte_order)
-        #print self.senssu
-        self.rline[0] = self.sv01000(byte_string_array[46:50], 0, self.byte_order)
-        self.rline[1] = self.sv01000(byte_string_array[50:54], 0, self.byte_order)
-        self.rline[2] = self.sv01000(byte_string_array[50:54], 0, self.byte_order)
-        self.rline[3] = self.sv01000(byte_string_array[50:54], 0, self.byte_order)
-        #print self.rline
-        self.relem[0] = self.sv01000(byte_string_array[54:58], 0, self.byte_order)
-        self.relem[1] = self.sv01000(byte_string_array[58:62], 0, self.byte_order)
-        self.relem[2] = self.sv01000(byte_string_array[58:62], 0, self.byte_order)
-        self.relem[3] = self.sv01000(byte_string_array[58:62], 0, self.byte_order)
-        #print self.relem
-        self.vmis[0] = self.sv01000(byte_string_array[62:66], 10, self.byte_order)
-        self.vmis[1] = self.sv01000(byte_string_array[66:70], 10, self.byte_order)
-        self.vmis[2] = self.sv01000(byte_string_array[70:74], 10, self.byte_order)
-        #print self.vmis
-        self.elmis[0][0] = self.sv01000(byte_string_array[74:78], 7, self.byte_order)
-        self.elmis[1][0] = self.sv01000(byte_string_array[78:82], 10, self.byte_order)
-        self.elmis[2][0] = self.sv01000(byte_string_array[82:86], 10, self.byte_order)
-        self.elmis[0][1] = self.sv01000(byte_string_array[86:90], 10, self.byte_order)
-        self.elmis[1][1] = self.sv01000(byte_string_array[90:94], 7, self.byte_order)
-        self.elmis[2][1] = self.sv01000(byte_string_array[94:98], 10, self.byte_order)
-        self.elmis[0][2] = self.sv01000(byte_string_array[98:102], 10, self.byte_order)
-        self.elmis[1][2] = self.sv01000(byte_string_array[102:106], 10, self.byte_order)
-        self.elmis[2][2] = self.sv01000(byte_string_array[106:110], 7, self.byte_order)
-        #for i in range(3):
-        #    print self.elmis[i]
-        self.subLon = self.sv01000(byte_string_array[198:204], 6, self.byte_order)
-        #print self.subLon
-        self.subLat = self.sv01000(byte_string_array[204:210], 6, self.byte_order)
-        #print self.subLat
+        sv = self.sv01000
+        self.dtims = sv(0, 6, 8)
+        self.dspin = sv(240, 6, 8)
+        self.resLin[:] = [sv(6, 4, 8)] + [sv(10, 4, 8)] * 3
+        self.resEle[:] = [sv(14, 4, 10)] + [sv(18, 4, 10)] * 3
+        self.rlic[:] = [sv(22, 4, 4), sv(26, 4, 4), sv(110, 4, 4), sv(114, 4, 4)]
+        self.relmfc[:] = [sv(30, 4, 4), sv(34, 4, 4), sv(118, 4, 4), sv(122, 4, 4)]
+        self.senssu[:] = [sv(38, 4, 0)] + [sv(42, 4, 0)] * 3
+        self.rline[:] = [sv(46, 4, 0)] + [sv(50, 4, 0)] * 3
+        self.relem[:] = [sv(54, 4, 0)] + [sv(58, 4, 0)] * 3
+        self.vmis[:] = [sv(62, 4, 10), sv(66, 4, 10), sv(70, 4, 10)]
+        # misalignment matrix, column by column
+        for k, (row, column, power) in enumerate([(0, 0, 7), (1, 0, 10), (2, 0, 10), (0, 1, 10), (1, 1, 7),
+                                                  (2, 1, 10), (0, 2, 10), (1, 2, 10), (2, 2, 7)]):
+            self.elmis[row, column] = sv(74 + 4 * k, 4, power)
+        self.subLon = np.float32(sv(198, 6, 6))
+        self.subLat = np.float32(sv(204, 6, 6))
         for i in range(10):
-            if form == 1:
-                j = (i - 1) * 64 + 256
-            if form == 0:
-                j = (i - 1) * 48 + 256
-            self.atit[0][i] = self.sv01000(byte_string_array[j:j+6], 8, self.byte_order)
-            self.atit[2][i] = self.sv01000(byte_string_array[j+12:j+12+6], 8, self.byte_order)
-            self.atit[3][i] = self.sv01000(byte_string_array[j+18:j+18+6], 11, self.byte_order)
-            self.atit[4][i] = self.sv01000(byte_string_array[j+24:j+24+6], 8, self.byte_order)
-            self.atit[5][i] = self.sv01000(byte_string_array[j+30:j+30+6], 8, self.byte_order)
-
-            # if i == 0:
-            #     print self.atit[0][i]
-            #     print self.atit[2][i]
-            #     print self.atit[3][i]
-            #     print self.atit[4][i]
-            #     print self.atit[5][i]
-            #
+            j = (i - 1) * 64 + 256 if form == 1 else (i - 1) * 48 + 256
+            self.atit[0, i] = sv(j, 6, 8)
+            self.atit[2, i] = sv(j + 12, 6, 8)
+            self.atit[3, i] = sv(j + 18, 6, 11)
+            self.atit[4, i] = sv(j + 24, 6, 8)
+            self.atit[5, i] = sv(j + 30, 6, 8)
         for i in range(8):
-            if form == 1:
-                j = (i-1)*256 + 896
-            if form == 0:
-                j = (i-1) * 200 + 736
-            self.orbt1[0][i] = self.sv01000(byte_string_array[j:j+6], 8, self.byte_order)
-            self.orbt1[8][i] = self.sv01000(byte_string_array[j+48:j+48+6], 6, self.byte_order)
-            self.orbt1[9][i] = self.sv01000(byte_string_array[j+54:j+54+6], 6, self.byte_order)
-            self.orbt1[10][i] = self.sv01000(byte_string_array[j+60:j+60+6], 6, self.byte_order)
-            self.orbt1[14][i] = self.sv01000(byte_string_array[j+84:j+84+6], 8, self.byte_order)
-            self.orbt1[17][i] = self.sv01000(byte_string_array[j+102:j+102+6], 8, self.byte_order)
-            self.orbt1[18][i] = self.sv01000(byte_string_array[j+108:j+108+6], 8, self.byte_order)
-            self.orbt1[19][i] = self.sv01000(byte_string_array[j+128:j+128+6], 12, self.byte_order)
-            self.orbt1[20][i] = self.sv01000(byte_string_array[j+134:j+134+6], 14, self.byte_order)
-            self.orbt1[21][i] = self.sv01000(byte_string_array[j+140:j+140+6], 14, self.byte_order)
-            self.orbt1[22][i] = self.sv01000(byte_string_array[j+146:j+146+6], 14, self.byte_order)
-            self.orbt1[23][i] = self.sv01000(byte_string_array[j+152:j+152+6], 12, self.byte_order)
-            self.orbt1[24][i] = self.sv01000(byte_string_array[j+158:j+158+6], 16, self.byte_order)
-            self.orbt1[25][i] = self.sv01000(byte_string_array[j+164:j+164+6], 12, self.byte_order)
-            self.orbt1[26][i] = self.sv01000(byte_string_array[j+170:j+170+6], 16, self.byte_order)
-            self.orbt1[27][i] = self.sv01000(byte_string_array[j+176:j+176+6], 12, self.byte_order)
-
-
-            # print '-'*50
-            # for mmm in (0, 8, 9, 10, 14, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27):
-            #     print 'orbt1[%d][%d] %.5f %s ' % (mmm, i, self.orbt1[mmm][i], type(self.orbt1[mmm][i]))
-            #
-
-    def linele_scantime(self, linele=None):
-        mode = -1
-        imglinele = self.areaCoordtoImageCoord_np(linele=linele)
-
-        rPix = imglinele[1]
-        rLin = imglinele[0]
-
-        shp = rPix.shape
-        # cmask = np.ones(lat.shape).astype(np.bool)
-        rPix = rPix.ravel()
-        rLin = rLin.ravel()
-        # vissr frame
-        lMode = abs(mode) - 1
-
-        rsamp = self.resEle[lMode]
-
-        sens = self.senssu[lMode]
-
-        rtim = ((self.rint_np(rLin - 1) / sens) + (rPix * rsamp) / self.dpai) / (self.dspin * 1440.) + self.dtims
-        return rtim.reshape(shp)
-
-
-
-
-    def latlon_scantime(self, latlon=None):
-        mode = 1
-        lon = ((latlon[self.indexLon] + 180.0) % 360.0) - 180.0
-        lat = latlon[self.indexLat]
-        sz = lat.size
-        shp = lon.shape
-
-
-        lon = lon.ravel()
-        lat = lat.ravel()
-
-        # now allocate matrices for the computataion dependant attributes cecessary in array mode
-        # these attributes are scalars in point mode but they become array in array mode
-        self.sat = np.zeros((3, sz))
-        self.sp = np.zeros((3, sz))
-        self.ss = np.zeros((3, sz))
-        self.sitagt = np.zeros((sz))
-        self.sunalp = np.zeros((sz))
-        self.sundel = np.zeros((sz))
-        tri = np.zeros((sz))
-        trj = np.zeros((sz))
-
-        # cmask = np.ones(lat.shape).astype(np.bool)
-
-        stn1 = [nan, nan, nan]
-
-
-        m = (lat > 90) | (lat < -90)
-        if m[m].size > 0:
-            return
-        # vissr frame
-        lMode = abs(mode) - 1
-        rstep = self.resLin[lMode]
-        rfcl = self.rlic[lMode]
-        sens = self.senssu[lMode]
-        dLat = lat * self.cdr
-        dLon = lon * self.cdr
-        ee = 2. * self.ef - (self.ef * self.ef)
-
-        sin_lat = np.sin(dLat)
-        cos_lat = np.cos(dLat)
-        sin_lon = np.sin(dLon)
-        cos_lon = np.cos(dLon)
-        en = (self.ea / np.sqrt(1. - ee * sin_lat * sin_lat))
-
-        stn1[0] = en * cos_lat * cos_lon
-        stn1[1] = en * cos_lat * sin_lon
-        stn1[2] = en * (1. - ee) * sin_lat
-        rio = rfcl - np.arctan(sin_lat / (6.610689 - cos_lat)) / rstep  # i guess 6.1 ms is the scan ytime for a swath, it makes sens if I look to this line of code
-
-        rtim = self.dtims + (rio / sens / 1440.) / self.dspin
-        return rtim.reshape(shp)
-
-    def compute_orbital_zones(self, rscantime=None):
-        _shp = rscantime.shape
-        rscantime = rscantime.ravel()
-        orbt_values = self.orbt1[0]
-        orbt_zones = np.digitize(rscantime, orbt_values) - 1  # ?? should i extract one
-        return orbt_zones.reshape(_shp)
-        # unique_orb_zones = np.unique(orbt_zones)
-        # for orbt_zone in unique_orb_zones:
-        #     m = orbt_zones == orbt_zone
-
-    def toLinEle2(self, latlon=None):
-        #print 'indexLat', self.indexLat
-        #print 'indexLoin', self.indexLon
-
-        mode = 1
-        lon = ((latlon[self.indexLon] + 180.0) % 360.0) - 180.0
-        lat = latlon[self.indexLat]
-        sz = lat.size
-        shp = lon.shape
-
-
-
-        lon = lon.ravel()
-        lat = lat.ravel()
-
-
-        #now allocate matrices for the computataion dependant attributes cecessary in array mode
-        #these attributes are scalars in point mode but they become array in array mode
-        self.sat = np.zeros((3, sz))
-        self.sp = np.zeros((3, sz))
-        self.ss = np.zeros((3, sz))
-        self.sitagt = np.zeros((sz))
-        self.sunalp = np.zeros((sz))
-        self.sundel = np.zeros((sz))
-        tri = np.zeros((sz))
-        trj = np.zeros((sz))
-
-
-        #cmask = np.ones(lat.shape).astype(np.bool)
-
-        stn1 = np.zeros((3, sz))
-
-        slv = np.zeros((3, sz))
-        sw3 = np.zeros((3, sz))
-        m = (lat > 90) | (lat <-90)
-        if m[m].size> 0:
-            return None, None
-
-
-
-        # vissr frame
-        lMode = abs(mode) - 1
-
-        rstep = self.resLin[lMode]
-        rsamp = self.resEle[lMode]
-        rfcl = self.rlic[lMode]
-
-        rfcp = self.relmfc[lMode]
-
-        sens = self.senssu[lMode]
-        rftl = self.rline[lMode] + .5
-        rftp = self.relem[lMode] + .5
-
-        dLat = lat * self.cdr
-        dLon = lon * self.cdr
-        ee = 2. * self.ef - (self.ef * self.ef)
-
-        sin_lat = np.sin(dLat)
-        cos_lat = np.cos(dLat)
-        sin_lon = np.sin(dLon)
-        cos_lon = np.cos(dLon)
-        en = (self.ea / np.sqrt(1. - ee * sin_lat * sin_lat))
-
-        stn1[0] = en * cos_lat * cos_lon
-        stn1[1] = en * cos_lat * sin_lon
-        stn1[2] = en * (1. - ee) * sin_lat
-        rio = rfcl - np.arctan(sin_lat / (6.610689 - cos_lat)) / rstep  # i guess 6.1 ms is the scan ytime for a swath, it makes sens if I look to this line of code
-
-        rtim = self.dtims + (rio / sens / 1440.) / self.dspin
-
-
-
-        gg = 0
-        while True:
-            #print 'iter', gg, 'rio size', rio.size
-            # if gg == 0:
-			#
-            #     print 'sp', self.sp
-            #     print 'ss', self.ss
-            #     print 'sat', self.sat
-            beta = self.mg1100_np(rtim)
-
-
-
-
-
-            # if gg == 0:
-            #     print 'beta', beta, beta.dtype
-            #     print 'sp', self.sp
-            #     print 'ss', self.ss
-            #     print 'sat', self.sat
-
-            sw1 = self.mg1220_np(self.sp, self.ss)
-
-            sw2 = self.mg1220_np(sw1, self.sp)
-
-            bc = np.cos(beta)
-            bs = np.sin(beta)
-            sw3[0] = (sw1[0] * bs) + (sw2[0] * bc)
-            sw3[1] = (sw1[1] * bs) + (sw2[1] * bc)
-            sw3[2] = (sw1[2] * bs) + (sw2[2] * bc)
-            sx = self.mg1200_np(sw3)
-            sy = self.mg1220_np(self.sp, sx)
-
-            # try:
-			#
-            #     slv[0] = stn1[0][cmask] - self.sat[0][cmask]
-            #     slv[1] = stn1[1][cmask] - self.sat[1][cmask]
-            #     slv[2] = stn1[2][cmask] - self.sat[2][cmask]
-            # except UnboundLocalError:
-            #     slv[0] = stn1[0] - self.sat[0]
-            #     slv[1] = stn1[1] - self.sat[1]
-            #     slv[2] = stn1[2] - self.sat[2]
-            slv[0] = stn1[0] - self.sat[0]
-            slv[1] = stn1[1] - self.sat[1]
-            slv[2] = stn1[2] - self.sat[2]
-            sl = self.mg1200_np(slv)
-
-            sw2 = self.mg1210(self.sp, sl)
-            sw3 = self.mg1210(sy, sw2)
-            tp = self.mg1230_np(sy, sw2)
-            tf = (self.sp[0] * sw3[0]) + (self.sp[1] * sw3[1]) + (self.sp[2] * sw3[2])
-
-            if np.all(tf < 0):
-                tp = -tp
-
-            tl = self.mg1230_np(self.sp, sl)
-
-
-
-
-            ri = (self.hpai - tl) / rstep + rfcl - (self.vmis[1] / rstep)
-
-
-            rj = tp / rsamp + rfcp + (self.vmis[2] / rsamp) - (self.hpai - tl) * np.tan(self.vmis[0]) / rsamp
-
-
-            #now this is a bit tricky as I ned to update the cmask in order to correctly emulate the original while loop
-            gg += 1
-            diff = np.abs(ri-rio)
-
-
-            cmask = diff >=1
-            # from pylab import show, imshow, title, colorbar
-            # imshow(cmask.reshape((shp)))
-            # title('cmask')
-            # colorbar()
-            # show()
-            # imshow(rio.reshape((shp)))
-            # title('rio')
-            # colorbar()
-            # show()
-            #print 'diff', diff.mean()
-
-
-            if cmask[cmask].size > 0:
-                print ('masking %s for %s in percent %s' % (cmask[cmask].size, lat.size, cmask[cmask].size/float(lat.size) * 100))
-
-                # from pylab import show, imshow, title, colorbar
-                # imshow(cmask.reshape((3900, 2700)))
-                # colorbar()
-                # title('cmask%s' % gg)
-                # show()
-                #if abs(ri - rio) >= 1.:
-                #mask the rtim adn rio, i am not sure if this is enough thoufh
-                #rtim = ((self.rint_np((ri - 1) / sens) + (rj * rsamp) / self.dpai) / (self.dspin * 1440.0) + self.dtims)[cmask]
-                rtim1 = (self.rint_np((ri - 1) / sens) + rj * rsamp / self.dpai) / (self.dspin * 1440.0) + self.dtims
-
-                rtim[cmask] = rtim1[cmask]
-
-                rio[cmask] = ri[cmask]
-                #rio = ri[cmask]
+            j = (i - 1) * 256 + 896 if form == 1 else (i - 1) * 200 + 736
+            self.orbt1[0, i] = sv(j, 6, 8)
+            self.orbt1[8, i] = sv(j + 48, 6, 6)
+            self.orbt1[9, i] = sv(j + 54, 6, 6)
+            self.orbt1[10, i] = sv(j + 60, 6, 6)
+            self.orbt1[14, i] = sv(j + 84, 6, 8)
+            self.orbt1[17, i] = sv(j + 102, 6, 8)
+            self.orbt1[18, i] = sv(j + 108, 6, 8)
+            # nutation and precession matrix, column by column
+            for k, (offset, power) in enumerate([(128, 12), (134, 14), (140, 14), (146, 14), (152, 12),
+                                                 (158, 16), (164, 12), (170, 16), (176, 12)]):
+                self.orbt1[19 + k, i] = sv(j + offset, 6, power)
+
+    def _orbit_and_attitude(self, rtim):
+        """Satellite position, spin axis and sun direction at the times ``rtim`` (mg1100 and mg1110).
+
+        Returns ``beta, sat, sp, ss``; NaN where the time is outside the orbit or attitude predictions
+        (VisAD silently keeps the values of the previous call there).
+        """
+        n = rtim.size
+        orbit_times, atit_times = self.orbt1[0], self.atit[0]
+        sat = np.full((3, n), nan)
+        sitagt = np.full(n, nan)
+        sunalp = np.full(n, nan)
+        sundel = np.full(n, nan)
+        npa = np.full((3, 3, n), nan)
+        found = np.zeros(n, dtype=bool)
+        o = self.orbt1
+        for i in range(7):
+            use = ~found & (rtim > orbit_times[i]) & (rtim < orbit_times[i + 1])
+            if not use.any():
                 continue
+            found |= use
+            delt = (rtim[use] - orbit_times[i]) / (orbit_times[i + 1] - orbit_times[i])
+            for axis, row in enumerate((8, 9, 10)):
+                sat[axis, use] = o[row, i] + (o[row, i + 1] - o[row, i]) * delt
+            gst_step = o[14, i + 1] - o[14, i]
+            if gst_step < 0.0:
+                gst_step += 360.0
+            sitagt[use] = (o[14, i] + gst_step * delt) * _CDR
+            sun_step = o[17, i + 1] - o[17, i]
+            if sun_step > 0.0:
+                sun_step -= 360.0
+            sunalp[use] = (o[17, i] + sun_step * delt) * _CDR
+            sundel[use] = (o[18, i] + (o[18, i + 1] - o[18, i]) * delt) * _CDR
+            for k, (row, column) in enumerate([(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1), (0, 2), (1, 2), (2, 2)]):
+                npa[row, column, use] = o[19 + k, i]
 
-            break
-
-        #print 'end rio size', rio.size
-        #sanity check for bounds
-        if np.any((ri < 0) | (ri > rftl)):
-            rc = 4
-            print ('inv line')
-            return None, None
-
-        if np.any((rj < 0) | (rj > rftp)):
-            rc = 5
-            print ('inv ele')
-            return None, None
-
-
-        rri = ri.reshape(shp)
-        rrj = rj.reshape(shp)
-
-        return self.imageCoordToAreaCoord_np(linele=[rri, rrj])
-
-    def toLinEle(self, latlon=None):
-        mode = 1
-        count = len(latlon[0])
-        linele = [[nan for i in range(count)], [nan for i in range(count)]]
-
-        for point in range(count):
-            #init as not navigable
-            linele[self.indexLine][point] = nan
-            linele[self.indexEle][point] = nan
-            if latlon[self.indexLat][point] > 90:
+        beta = np.full(n, nan)
+        attalp = np.full(n, nan)
+        attdel = np.full(n, nan)
+        found = np.zeros(n, dtype=bool)
+        a = self.atit
+        for i in range(9):
+            use = ~found & (rtim >= atit_times[i]) & (rtim < atit_times[i + 1])
+            if not use.any():
                 continue
-            #normalize
-            lon =  ((latlon[self.indexLon][point] + 180.0) % 360.0) - 180.0
-            lat = latlon[self.indexLat][point]
+            found |= use
+            delt = (rtim[use] - atit_times[i]) / (atit_times[i + 1] - atit_times[i])
+            attalp[use] = a[2, i] + (a[2, i + 1] - a[2, i]) * delt
+            attdel[use] = a[3, i] + (a[3, i + 1] - a[3, i]) * delt
+            beta_step = a[4, i + 1] - a[4, i]
+            if beta_step > 0.0:
+                beta_step -= 360.0 * _CDR
+            beta[use] = a[4, i] + beta_step * delt
 
-            rtnPoint = self.msivsr(mode,0,0,lat, lon)
+        cos_del = np.cos(attdel)
+        att1 = np.array([np.sin(attdel), cos_del * -np.sin(attalp), cos_del * np.cos(attalp)])
+        att2 = np.einsum('ijn,jn->in', npa, att1)
+        sin_gst, cos_gst = np.sin(sitagt), np.cos(sitagt)
+        att3 = np.array([cos_gst * att2[0] + sin_gst * att2[1], -sin_gst * att2[0] + cos_gst * att2[1], att2[2]])
+        sp = _unit(att3)
+        cos_sundel = np.cos(sundel)
+        ss = np.array([cos_sundel * np.cos(sunalp), cos_sundel * np.sin(sunalp), np.sin(sundel)])
+        return beta, sat, sp, ss
 
-            linele[self.indexLine][point] = rtnPoint[0]
-            linele[self.indexEle][point] = rtnPoint[1]
+    def _spin_axes(self, beta, sp, ss):
+        """The unit vectors ``sx`` and ``sy`` of the VISSR frame, with ``sp`` the spin axis."""
+        sw1 = _unit_cross(sp, ss)
+        sw2 = _unit_cross(sw1, sp)
+        sx = _unit(sw1 * np.sin(beta) + sw2 * np.cos(beta))
+        return sx, _unit_cross(sp, sx)
 
-        return self.imageCoordToAreaCoord(linele=linele)
+    def _scan_time(self, line, elem):
+        """Time (MJD) at which the VISSR scanned image ``line`` and ``elem``; each sensor takes a line of a scan."""
+        sens, rsamp = _F32(self.senssu[0]), _F32(self.resEle[0])
+        whole = np.rint(((line.astype(_F32) - _F32(1)) / sens).astype(float))
+        fraction = (elem.astype(_F32) * rsamp).astype(float) / self.DPAI
+        return (whole + fraction) / (self.dspin * 1440.0) + self.dtims
+
+    def _image_to_latlon(self, line, elem):
+        """VISSR image line and element (mode -1 of mgivsr) to latitude and longitude, NaN if the Earth is missed."""
+        rstep, rsamp, rfcl, rfcp = (float(self.resLin[0]), float(self.resEle[0]), float(self.rlic[0]),
+                                    float(self.relmfc[0]))
+        beta, sat, sp, ss = self._orbit_and_attitude(self._scan_time(line, elem))
+        sx, sy = self._spin_axes(beta, sp, ss)
+        pc, ps = np.cos(rstep * (line - rfcl)), np.sin(rstep * (line - rfcl))
+        qc, qs = np.cos(rsamp * (elem - rfcp)), np.sin(rsamp * (elem - rfcp))
+        elmis = self.elmis.astype(float)
+        sw1 = np.array([elmis[r, 0] * pc + elmis[r, 2] * ps for r in range(3)])
+        sw2 = np.array([qc * sw1[0] - qs * sw1[1], qs * sw1[0] + qc * sw1[1], sw1[2]])
+        sl = _unit(sx * sw2[0] + sy * sw2[1] + sp * sw2[2])
+        de = (1.0 - self.EF) ** 2
+        dda = de * (sl[0] ** 2 + sl[1] ** 2) + sl[2] ** 2
+        ddb = de * (sat[0] * sl[0] + sat[1] * sl[1]) + sat[2] * sl[2]
+        ddc = de * (sat[0] ** 2 + sat[1] ** 2 - self.EA ** 2) + sat[2] ** 2
+        dd = ddb * ddb - dda * ddc
+        with np.errstate(invalid='ignore', divide='ignore'):
+            root = np.sqrt(dd)
+            dk1, dk2 = (-ddb + root) / dda, (-ddb - root) / dda
+            dk = np.where(np.abs(dk1) < np.abs(dk2), dk1, dk2)
+            hit = sat + dk * sl
+            lat = np.arctan(hit[2] / (de * np.sqrt(hit[0] ** 2 + hit[1] ** 2)))
+            lon = np.arctan2(hit[1], hit[0])
+        missed = ~((dd >= 0.0) & (dda != 0.0))
+        lat = np.where(missed, nan, lat * _CRD).astype(_F32).astype(float)
+        lon = np.where(missed, nan, lon * _CRD).astype(_F32).astype(float)
+        return lat, lon
+
+    def _latlon_to_image(self, lat, lon):
+        """Latitude and longitude (mode 1 of mgivsr) to VISSR image line and element, NaN if not seen."""
+        rstep, rsamp, rfcl, rfcp = (float(self.resLin[0]), float(self.resEle[0]), float(self.rlic[0]),
+                                    float(self.relmfc[0]))
+        sens = _F32(self.senssu[0])
+        n = lat.size
+        vmis = self.vmis.astype(float)
+        dlat, dlon = lat.astype(_F32).astype(float) * _CDR, lon.astype(_F32).astype(float) * _CDR
+        ee = 2.0 * self.EF - self.EF * self.EF
+        en = self.EA / np.sqrt(1.0 - ee * np.sin(dlat) ** 2)
+        stn1 = np.array([en * np.cos(dlat) * np.cos(dlon), en * np.cos(dlat) * np.sin(dlon),
+                         (en * (1.0 - ee)) * np.sin(dlat)])
+        with np.errstate(invalid='ignore', divide='ignore'):
+            rio = (rfcl - np.arctan(np.sin(dlat) / (6.610689 - np.cos(dlat))) / rstep).astype(_F32)
+            rtim = self.dtims + (rio / sens).astype(float) / 1440.0 / self.dspin
+        ri = np.full(n, nan)
+        rj = np.full(n, nan)
+        active = np.isfinite(rtim)
+        for _ in range(100):
+            if not active.any():
+                break
+            index = np.flatnonzero(active)
+            beta, sat, sp, ss = self._orbit_and_attitude(rtim[index])
+            sx, sy = self._spin_axes(beta, sp, ss)
+            sl = _unit(stn1[:, index] - sat)
+            sw2 = _cross(sp, sl)
+            sw3 = _cross(sy, sw2)
+            tp = _angle(sy, sw2)
+            tp = np.where((sp * sw3).sum(axis=0) < 0.0, -tp, tp)
+            tl = _angle(sp, sl)
+            new_i = ((self.HPAI - tl).astype(_F32) / _F32(rstep) + _F32(rfcl) - _F32(vmis[1] / rstep)).astype(float)
+            new_j = (tp / rsamp + rfcp + vmis[2] / rsamp - (self.HPAI - tl) * math.tan(vmis[0]) / rsamp).astype(_F32)
+            ri[index], rj[index] = new_i, new_j.astype(float)
+            moved = np.abs(new_i - rio[index]) >= 1.0
+            ok = np.isfinite(new_i) & np.isfinite(new_j)
+            again = index[moved & ok]
+            fraction = (new_j[moved & ok].astype(_F32) * _F32(rsamp)).astype(float) / self.DPAI
+            whole = np.rint(((new_i[moved & ok].astype(_F32) - _F32(1)) / sens).astype(float))
+            rtim[again] = (whole + fraction) / (self.dspin * 1440.0) + self.dtims
+            rio[again] = new_i[moved & ok].astype(_F32)
+            active = np.zeros(n, dtype=bool)
+            active[again] = True
+        else:
+            ri[active] = rj[active] = nan  # did not settle
+        rftl, rftp = float(_F32(self.rline[0] + 0.5)), float(_F32(self.relem[0] + 0.5))
+        with np.errstate(invalid='ignore'):
+            outside = ~((ri >= 0) & (ri <= rftl) & (rj >= 0) & (rj <= rftp))
+        return np.where(outside, nan, ri), np.where(outside, nan, rj)
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive. NaN for the side of the Earth the satellite does not see, and where the line of
+        sight misses the Earth.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        lat, lon = self._image_to_latlon(np.ravel(image_line).astype(float), np.ravel(image_elem).astype(float))
+        lon = np.where(lon > 180, lon - 360, lon)
+        lon = np.where(lon < -180, lon + 360, lon)
+        with np.errstate(invalid='ignore'):
+            hidden = (np.abs(lon) > 180) | ((-lon > 90 - self.subLon) & (-lon < 270 - self.subLon))
+        lat, lon = np.where(hidden, nan, lat), np.where(hidden, nan, lon)
+        return lat.reshape(line.shape), lon.reshape(line.shape)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is not seen from the satellite. A longitude
+        outside -180 to 180 is wrapped into it (VisAD rejects it).
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        flat_lat, flat_lon = np.ravel(lat).astype(float), np.ravel(lon).astype(float)
+        flat_lon = np.where(flat_lon > 180.0, flat_lon - 360.0, flat_lon)
+        flat_lon = np.where(flat_lon < -180.0, flat_lon + 360.0, flat_lon)
+        with np.errstate(invalid='ignore'):
+            usable = (np.abs(flat_lat) <= 90.0) & (np.abs(flat_lon) <= 180.0) \
+                & ~((-flat_lon > 90 - self.subLon) & (-flat_lon < 270 - self.subLon))
+        image_line = np.full(flat_lat.shape, nan)
+        image_elem = np.full(flat_lat.shape, nan)
+        if usable.any():
+            image_line[usable], image_elem[usable] = self._latlon_to_image(flat_lat[usable], flat_lon[usable])
+        line, elem = self._image_to_area(image_line, image_elem)
+        return line.reshape(lat.shape), elem.reshape(lat.shape)
 
     def toLatLon(self, linele=None):
-        mode = -1
-        count = len(linele[0])
-        latlon = [[nan ], [nan]]
-        #transform file to image coordinates
-        imgLinEle = self.areaCoordtoImageCoord(linele=linele)
+        """Convert ``[[elements], [lines]]`` (file coordinates; ``indexEle`` is 0 and ``indexLine`` 1) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        return [lat, lon]
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def scan_time(self, line, elem):
+        """Time (MJD) at which the VISSR scanned the image line and element (AREA/file coordinates)."""
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        return self._scan_time(np.ravel(image_line), np.ravel(image_elem)).reshape(line.shape)
+
+    def getSubpoint(self):
+        return float(self.subLat), float(self.subLon)
 
-        #print imgLinEle
-        for point in range(count):
-            rtnPoint = self.msivsr(mode, imgLinEle[self.indexEle][point], imgLinEle[self.indexLine][point], 0,0,)
-            #print rtnPoint
-            lon = rtnPoint[1]
-            lon = ((lon + 180.0) % 360.0) - 180.0
-            if abs(lon) > 180 or (-lon > 90-self.subLon and -lon < 270 - self.subLon):
-                return [nan, nan]
-
-            latlon[self.indexLat][point] = rtnPoint[0]
-            latlon[self.indexLon][point] = lon
-        return latlon
-
-    def toLatLon2(self, linele=None, ):
-
-        mode = -1
-        imglinele = self.areaCoordtoImageCoord_np(linele=linele)
-
-        rPix = imglinele[1]
-        rLin = imglinele[0]
-
-
-        shp = rPix.shape
-        # cmask = np.ones(lat.shape).astype(np.bool)
-        rPix = rPix.ravel()
-        rLin = rLin.ravel()
-
-        stn1 = [nan, nan, nan]
-        sw3 = [nan, nan, nan]
-
-
-        # vissr frame
-        lMode = abs(mode) - 1
-        rstep = self.resLin[lMode]
-        rsamp = self.resEle[lMode]
-        rfcl = self.rlic[lMode]
-        rfcp = self.relmfc[lMode]
-        sens = self.senssu[lMode]
-        #print rLin, sens, rPix, rsamp, self.dpai, self.dspin, self.dtims
-
-        rtim = ((self.rint_np(rLin - 1) / sens) + (rPix * rsamp) / self.dpai) / (self.dspin * 1440.) + self.dtims
-        #print 'rtim', rtim
-        beta = self.mg1100_np(rtim)
-        # print 'beta: ', beta
-        # print 'sp:', self.sp
-        # print 'ss:', self.ss
-        sw1 = self.mg1220_np(self.sp, self.ss)
-        sw2 = self.mg1220_np(sw1, self.sp)
-
-        bc = np.cos(beta)
-        bs = np.sin(beta)
-        sw3[0] = (sw1[0] * bs) + (sw2[0] * bc)
-        sw3[1] = (sw1[1] * bs) + (sw2[1] * bc)
-        sw3[2] = (sw1[2] * bs) + (sw2[2] * bc)
-        # print 'sw1:', sw1
-        # print 'sw2:', sw2
-        # print 'sw3', sw3
-        sx = self.mg1200_np(sw3)
-        sy = self.mg1220_np(self.sp, sx)
-        # print 'sx:', sx
-        # print 'sy:', sy
-        pc = np.cos(rstep * (rLin - rfcl))
-        ps = np.sin(rstep * (rLin - rfcl))
-        qc = np.cos(rsamp * (rPix - rfcp))
-        qs = np.sin(rsamp * (rPix - rfcp))
-        sw1[0] = (self.elmis[0][0] * pc) + (self.elmis[0][2] * ps)
-        sw1[1] = (self.elmis[1][0] * pc) + (self.elmis[1][2] * ps)
-        sw1[2] = (self.elmis[2][0] * pc) + (self.elmis[2][2] * ps)
-        # print sw1
-        sw2[0] = (qc * sw1[0]) - (qs * sw1[1])
-        sw2[1] = (qs * sw1[0]) + (qc * sw1[1])
-        sw2[2] = sw1[2]
-        # print sw2
-        sw3[0] = (sx[0] * sw2[0]) + (sy[0] * sw2[1]) + (self.sp[0] * sw2[2])
-        sw3[1] = (sx[1] * sw2[0]) + (sy[1] * sw2[1]) + (self.sp[1] * sw2[2])
-        sw3[2] = (sx[2] * sw2[0]) + (sy[2] * sw2[1]) + (self.sp[2] * sw2[2])
-
-        # print 'sw1:', sw1
-        # print 'sw2:', sw2
-        # print 'sw3', sw3
-
-        # print sw3
-        sl = self.mg1200_np(sw3)
-        # print 'sl:', sl
-        # print 'sat %.5f, %.5f, %.5f:' % (self.sat[0], self.sat[1], self.sat[2])
-        def1 = (1. - self.ef) * (1 - self.ef)
-        # print "def %.9f" % def1
-        dda = def1 * ((sl[0] * sl[0]) + (sl[1] * sl[1])) + (sl[2] * sl[2])
-        ddb = def1 * ((self.sat[0] * sl[0]) + (self.sat[1] * sl[1])) + (self.sat[2] * sl[2])
-        # print def1, self.sat[0], self.sat[1], self.sat[2], self.ea
-        ddc = def1 * ((self.sat[0] * self.sat[0]) + (self.sat[1] * self.sat[1]) - (self.ea * self.ea)) + (self.sat[2] * self.sat[2])
-        dd = (ddb * ddb) - (dda * ddc)
-
-        # print 'dda %.5f' % dda
-        # print 'ddb %.5f' % ddb
-        # print 'ddc %.5f' % ddc
-        # print 'dd %.5f' % dd
-
-        # if dd >= 0 and dda != 0:
-        #     dk1 = (-ddb + np.sqrt(dd)) / dda
-        #     dk2 = (- ddb - np.sqrt(dd)) / dda
-        # else:
-        #     rc = 6
-        #     return (None, None)
-
-        #this code is equivalent to the above  commented python code
-        ddm = (dd >= 0) & (dda != 0)
-        # now we need to be careful here as we will return invalid data
-        dk1 = np.where(ddm, (-ddb + np.sqrt(dd)) / dda, nan)
-        dk2 = np.where(ddm, (-ddb - np.sqrt(dd)) / dda, nan)
-
-
-        # if abs(dk1) < abs(dk2):
-        #     dk = dk1
-        # else:
-        #     dk = dk2
-        # print 'dk %.5f' % dk
-        abscondm = np.abs(dk1) < np.abs(dk2)
-        dk = np.where(abscondm, dk1, dk2)
-        stn1[0] = self.sat[0] + (dk * sl[0])
-        stn1[1] = self.sat[1] + (dk * sl[1])
-        stn1[2] = self.sat[2] + (dk * sl[2])
-        # print 'stn1', stn1
-        dLat = np.arctan(stn1[2] / (def1 * np.sqrt((stn1[0] * stn1[0]) + (stn1[1] * stn1[1]))))
-        # print dLat
-
-
-
-
-        # if stn1[0] != 0:
-        #     dLon = np.arctan(stn1[1] / stn1[0])
-        #
-        #     if stn1[0] < 0 and stn1[1] >= 0:
-        #         dLon = dLon + self.PI
-        #     if stn1[0] < 0 and stn1[1] < 0:
-        #         dLon = dLon - self.PI
-        # else:
-        #     if stn1[1] > 0:
-        #         dLon = self.hpai
-        #     else:
-        #         dLon = -self.hpai
-
-        #this code is equivalent to above python code
-        stn1_0_m = stn1[0] != 0
-        stn1_1_m = stn1[1] > 0
-        dLon = np.arctan(stn1[1] / stn1[0])
-        acon = (stn1[0] < 0) & (stn1[1] >= 0)[stn1_0_m]
-        bcon = (stn1[0] < 0) & (stn1[1] < 0)[stn1_0_m]
-        if np.any(acon):
-            dLon[acon] += self.PI
-        if np.any(bcon):
-            dLon[bcon] -= self.PI
-        if np.any(~stn1_0_m):
-            dLon[~stn1_0_m] = np.where(stn1_1_m, self.hpai, -self.hpai)
-
-
-
-
-        lat = dLat * self.crd
-        lon = dLon * self.crd
-
-        #normalize
-        lon = ((lon + 180.0) % 360.0) - 180.0
-        return [lat.reshape(shp), lon.reshape(shp)]
-
-
-    def msivsr(self, iMode, rPix, rLin, rLat, rLon):
-        """
-        actual conversion to/from lat/lon or line/elem
-        @param iMode - conversion mode, to lat/lon or to line/elem
-        @param rPix - float pixel or element value
-        @param rLin - float line value
-        @param rLat - float latitude value
-        @param rLon - float longitude value
-
-        @return array of two floating point values, lat/lon or line/elem pair
-        """
-        name = 'msivsr'
-        point = [nan, nan]
-        stn1 = [nan, nan, nan]
-        slv = [nan, nan, nan]
-        sw3  = [nan, nan, nan]
-        #sanity check
-        if iMode > 4:
-            return point
-        if np.any(np.abs(rLat)>90) and iMode > 0:
-            return point
-        #vissr frame
-        lMode = abs(iMode) -1
-        rstep = self.resLin[lMode]
-        rsamp = self.resEle[lMode]
-        rfcl = self.rlic[lMode]
-        rfcp = self.relmfc[lMode]
-        sens = self.senssu[lMode]
-        rftl = self.rline[lMode] + .5
-        rftp = self.relem[lMode] + .5
-
-
-
-        if iMode > 0: #transformation, geographical -> VISSR
-            dLat = rLat * self.cdr
-            dLon = rLon * self.cdr
-            ee = 2.*self.ef - (self.ef * self.ef)
-            sin_lat = np.sin(dLat)
-            cos_lat = np.cos(dLat)
-            sin_lon = np.sin(dLon)
-            cos_lon = np.cos(dLon)
-            en = self.ea / np.sqrt(1. - ee*sin_lat*sin_lat)
-            stn1[0] = en * cos_lat * cos_lon
-            stn1[1] = en * cos_lat * sin_lon
-            stn1[2] = en * (1. - ee) * sin_lat
-            rio = rfcl-np.arctan(sin_lat / (6.610689 - cos_lat)) / rstep # i guess 6.1 ms is the scan ytime for a swath, it makes sens if I look to this line of code
-            rtim = self.dtims + (rio/sens/1440.)/ self.dspin
-
-            gg = 0
-            while True:
-                #print 'mg1100'
-                #print 'classic iter ', gg
-                # if gg == 0:
-                #     print 'sp', self.sp
-                #     print 'ss', self.ss
-                #     print 'sat', self.sat
-
-                beta = self.mg1100(rtim)
-                # if gg == 0:
-
-                #     print 'sp', self.sp
-                #     print 'ss', self.ss
-                #     print 'sat', self.sat
-
-                sw1 = self.mg1220(self.sp, self.ss)
-
-                sw2 = self.mg1220(sw1, self.sp)
-
-                bc = np.cos(beta)
-                bs = np.sin(beta)
-                sw3[0] = (sw1[0] * bs) + (sw2[0] * bc)
-                sw3[1] = (sw1[1] * bs) + (sw2[1] * bc)
-                sw3[2] = (sw1[2] * bs) + (sw2[2] * bc)
-                sx = self.mg1200(sw3)
-                sy = self.mg1220(self.sp, sx)
-
-                slv[0] = stn1[0] - self.sat[0]
-                slv[1] = stn1[1] - self.sat[1]
-                slv[2] = stn1[2] - self.sat[2]
-
-                sl = self.mg1200(slv)
-
-                sw2 = self.mg1210(self.sp, sl)
-                sw3 = self.mg1210(sy, sw2)
-                tp = self.mg1230(sy, sw2)
-                tf = (self.sp[0] * sw3[0]) + (self.sp[1] * sw3[1]) + (self.sp[2] * sw3[2])
-
-                if tf < 0:
-                    tp = -tp
-
-
-                tl = self.mg1230(self.sp, sl)
-
-                ri = float(self.hpai - tl) / rstep + rfcl - (self.vmis[1] / rstep)
-                rj = float(tp / rsamp + rfcp + (self.vmis[2] / rsamp) - (self.hpai - tl) * np.tan(self.vmis[0]) / rsamp)
-
-                gg+=1
-                if abs(ri - rio) >= 1.:
-                    rtim = (self.rint((ri - 1) / sens) + (rj * rsamp) / self.dpai) / (self.dspin * 1440.0) + self.dtims
-                    rio = ri
-                    continue
-                break
-
-            rLin = ri
-            rPix = rj
-
-            if rLin > 0 and rLin < rftl:
-                if rPix > 0 and rPix < rftp:
-                    point[0] = rLin
-                    point[1] = rPix
-
-                else:
-                    rc = 5
-            else:
-                rc = 4
-
-        if iMode < 0: #transformation, VISSR -> geographical
-            #print rLin, sens, rPix, rsamp, self.dpai, self.dspin, self.dtims
-            rtim = ((self.rint(rLin-1) / sens) + (rPix*rsamp) / self.dpai) / (self.dspin*1440.) + self.dtims
-            #print 'rtim: ', rtim
-            beta = self.mg1100(rtim)
-            #print 'beta: ', beta
-            #print 'sp:', self.sp
-            #print 'ss:', self.ss
-            sw1 = self.mg1220(self.sp, self.ss)
-            sw2 = self.mg1220(sw1, self.sp)
-
-            bc = np.cos(beta)
-            bs = np.sin(beta)
-            sw3[0] = (sw1[0] * bs) + (sw2[0] * bc)
-            sw3[1] = (sw1[1] * bs) + (sw2[1] * bc)
-            sw3[2] = (sw1[2] * bs) + (sw2[2] * bc)
-            #print 'sw1:', sw1
-            #print 'sw2:', sw2
-            #print 'sw3', sw3
-            sx = self.mg1200(sw3)
-            sy = self.mg1220(self.sp, sx)
-            #print 'sx:', sx
-            #print 'sy:', sy
-            pc = np.cos(rstep * (rLin-rfcl))
-            ps = np.sin(rstep * (rLin-rfcl))
-            qc = np.cos(rsamp * (rPix-rfcp))
-            qs = np.sin(rsamp * (rPix-rfcp))
-            sw1[0] = (self.elmis[0][0] * pc) + (self.elmis[0][2] * ps)
-            sw1[1] = (self.elmis[1][0] * pc) + (self.elmis[1][2] * ps)
-            sw1[2] = (self.elmis[2][0] * pc) + (self.elmis[2][2] * ps)
-            #print sw1
-            sw2[0] = (qc * sw1[0]) - (qs * sw1[1])
-            sw2[1] = (qs * sw1[0]) + (qc * sw1[1])
-            sw2[2] = sw1[2]
-            #print sw2
-            sw3[0] = (sx[0] * sw2[0]) + (sy[0] * sw2[1]) + (self.sp[0] * sw2[2])
-            sw3[1] = (sx[1] * sw2[0]) + (sy[1] * sw2[1]) + (self.sp[1] * sw2[2])
-            sw3[2] = (sx[2] * sw2[0]) + (sy[2] * sw2[1]) + (self.sp[2] * sw2[2])
-
-            # print 'sw1:', sw1
-            # print 'sw2:', sw2
-            # print 'sw3', sw3
-
-            #print sw3
-            sl = self.mg1200(sw3)
-            #print 'sl:', sl
-            #print 'sat %.5f, %.5f, %.5f:' % (self.sat[0], self.sat[1], self.sat[2])
-            def1 = (1.- self.ef) * (1-self.ef)
-            #print "def %.9f" % def1
-            dda = def1 * ((sl[0] * sl[0]) + (sl[1] * sl[1])) + (sl[2] * sl[2])
-            ddb = def1 * ((self.sat[0] * sl[0]) + (self.sat[1] * sl[1])) + (self.sat[2] * sl[2])
-            #print def1, self.sat[0], self.sat[1], self.sat[2], self.ea
-            ddc = def1 * ((self.sat[0] * self.sat[0]) + (self.sat[1] * self.sat[1]) - (self.ea * self.ea)) + (self.sat[2] * self.sat[2])
-            dd = (ddb * ddb) - (dda*ddc)
-
-            # print 'dda %.5f' % dda
-            # print 'ddb %.5f' % ddb
-            # print 'ddc %.5f' % ddc
-            #print 'dd %.5f' % dd
-
-            if dd >= 0 and dda != 0:
-                dk1 = (-ddb + np.sqrt(dd))/ dda
-                dk2 =  (- ddb - np.sqrt(dd)) / dda
-            else:
-                rc= 6
-                return point
-
-            if abs(dk1) < abs(dk2):
-                dk = dk1
-            else:
-                dk = dk2
-            #print 'dk %.5f' % dk
-            stn1[0] = self.sat[0] + (dk * sl[0])
-            stn1[1] = self.sat[1] + (dk * sl[1])
-            stn1[2] = self.sat[2] + (dk * sl[2])
-            #print 'stn1', stn1
-            dLat = np.arctan(stn1[2] / (def1 * np.sqrt((stn1[0]* stn1[0]) + (stn1[1]*stn1[1])) ))
-            #print dLat
-            if stn1[0] != 0:
-                dLon = math.atan(stn1[1]/stn1[0])
-                if stn1[0] < 0 and stn1[1] >= 0:
-                    dLon = dLon + self.PI
-                if stn1[0] < 0 and stn1[1] < 0:
-                    dLon = dLon - self.PI
-            else:
-                if stn1[1] > 0:
-                    dLon = self.hpai
-                else:
-                    dLon = -self.hpai
-
-            point[0]= dLat * self.crd
-            point[1]= dLon * self.crd
-
-        return point
-
-    @staticmethod
-    def rint(num):
-        """Rounds toward the even number if equidistant"""
-        return round(num + (num % 2 - 1 if (num % 1 == 0.5) else 0))
-
-    @staticmethod
-    def rint_np(num):
-        """Rounds toward the even number if equidistant"""
-
-        t = np.where(num % 1 == 0.5, num % 2 - 1 , 0)
-        return np.round(num + t)
-
-    def mg1110_np(self, i, rtim, orbta, mask):
-
-        npa = np.zeros((3, 3))
-
-        #print i, rtim, (rtim-orbta[0][0:6]) / ( orbta[0][1:7]-orbta[0][0:6]).tolist()
-
-        if i != 7:
-
-            # print 'i sat %d' % i
-            # print 'rtim %.5f' % rtim
-            # print 'orbta[0][%d] %.8f , orbta[0][%d+1] %.8f' % ( i, orbta[0][i], i, orbta[0][i+1])
-
-            delt = (rtim - orbta[0][i]) / (orbta[0][i + 1] - orbta[0][i])
-
-
-            # delt = np.where(mask, delt, 0)
-
-            # print 'delt', delt
-
-            self.sat[0] = orbta[8][i] + (orbta[8][i + 1] - orbta[8][i]) * delt
-            self.sat[1] = orbta[9][i] + (orbta[9][i + 1] - orbta[9][i]) * delt
-            self.sat[2] = orbta[10][i] + (orbta[10][i + 1] - orbta[10][i]) * delt
-
-
-            # print 'setting sat %.5f, %.5f, %.5f:' %  (self.sat[0], self.sat[1], self.sat[2])
-            self.sitagt = (orbta[14][i] + (orbta[14][i + 1] - orbta[14][i]) * delt) * self.cdr
-            if orbta[14][i + 1] - orbta[14][i] < 0:
-                self.sitagt = (orbta[14][i] + (orbta[14][i + 1] - orbta[14][i] + 360.0) * delt) * self.cdr
-
-            self.sunalp = (orbta[17][i] + (orbta[17][i + 1] - orbta[17][i]) * delt) * self.cdr
-
-            if orbta[17][i + 1] - orbta[17][i] > 0:
-                self.sunalp = (orbta[17][i] + (orbta[17][i + 1] - orbta[17][i] - 360.0) * delt) * self.cdr
-
-            self.sundel = (orbta[18][i] + (orbta[18][i + 1] - orbta[18][i]) * delt) * self.cdr
-
-            # compute npa for every point/coodinate?
-
-            npa[0][0] = orbta[19][i]
-            npa[1][0] = orbta[20][i]
-            npa[2][0] = orbta[21][i]
-            npa[0][1] = orbta[22][i]
-            npa[1][1] = orbta[23][i]
-            npa[2][1] = orbta[24][i]
-            npa[0][2] = orbta[25][i]
-            npa[1][2] = orbta[26][i]
-            npa[2][2] = orbta[27][i]
-        return npa
-
-    def mg1100_np(self, rtim):
-        """
-        I have no clue , but it seem to do some conversion. Im mcidas check the file gms5_nav.for
-        for further details.
-        :param rtim:
-        :return:
-        """
-        sz = rtim.size
-
-        #beta = delta = attalp = attdel = wkcos = wksin = 0.
-        beta = np.zeros((sz))
-        delta_orbt = np.zeros((sz))
-        delta_atit = np.zeros((sz))
-        attalp = np.zeros((sz))
-        attdel = np.zeros((sz))
-        #wkcos = np.zeros((sz))
-        #wksin = np.zeros((sz))
-
-        #att1 = [nan, nan, nan]
-        att1 = np.zeros((3, sz))
-        #att2 = [nan, nan, nan]
-        att2 = np.zeros((3, sz))
-        #att3 = [nan, nan, nan]
-        att3 = np.zeros((3,sz))
-        # npa = [[nan for _i in range(3)] for _ii in range(3)]
-        #npa = np.zeros((3, 3))
-
-
-        """
-            This is where the array based code is pretty much different from original code. The backbone of the navigation are the orbital
-            and attitude coefficients. One has to be aware that as the scan pattern (swaths) plays a central role in determining the correct navigation
-
-            While in single point mode the computation happens in a loop that exits when the orbit prediction sub-block for the specific pixel is determined.
-
-            There are 8 orbit prediction sub blocks.
-        """
-
-
-
-        # step 2 determine and calcultae attitude corrections
-        atit_values = self.atit[0]
-        atit_zones = np.digitize(rtim, atit_values) - 1  # ?? should i extract one
-        unique_atit_zones = np.unique(atit_zones)
-
-        for atit_zone in unique_atit_zones:
-            m_ = atit_zones == atit_zone
-            delta_atit[m_] = (rtim[m_] - atit_values[atit_zone]) / (atit_values[atit_zone + 1] - atit_values[atit_zone])
-
-            attalp[m_] = self.atit[2][atit_zone] + (self.atit[2][atit_zone + 1] - self.atit[2][atit_zone]) * delta_atit[m_]
-            attdel[m_] = self.atit[3][atit_zone] + (self.atit[3][atit_zone + 1] - self.atit[3][atit_zone]) * delta_atit[m_]
-            beta[m_] = self.atit[4][atit_zone] + (self.atit[4][atit_zone + 1] - self.atit[4][atit_zone]) * delta_atit[m_]
-            if self.atit[4][atit_zone + 1] - self.atit[4][atit_zone] > 0:
-                beta[m_] = self.atit[4][atit_zone] + (self.atit[4][atit_zone + 1] - self.atit[4][atit_zone] - 360.0 * self.cdr) * delta_atit[m_]
-
-        wkcos = np.cos(attdel)
-        att1[0] = np.sin(attdel)
-        att1[1] = wkcos * -np.sin(attalp)
-        att1[2] = wkcos * np.cos(attalp)
-        # from pylab import show, imshow, title, colorbar
-        # imshow(attdel.reshape((4800, 2400)))
-        # colorbar()
-        # title('attdel')
-        # show()
-        # print wkcos, att1
-        '''
-		for i in range(9):
-			# print 'atit', i, rtim, self.atit[0][i], self.atit[0][i + 1]
-			m__ = (rtim > self.atit[0][i]) & (rtim < self.atit[0][i + 1])
-			mrtim = rtim[m__]
-
-			if np.all(m__) :
-
-				if mrtim.size != rtim.size:  # what happens here?? the npa seems to be som
-					print 'Inconsistent1 results are possible! mrtim.size %s rtim.size %s' % (mrtim.size, rtim.size)
-
-				delt_orbt = (rtim - self.atit[0][i]) / (self.atit[0][i + 1] - self.atit[0][i])
-				# delt = np.where(~m__, delt,0)
-				attalp = self.atit[2][i] + (self.atit[2][i + 1] - self.atit[2][i]) * delt_orbt
-				attdel = self.atit[3][i] + (self.atit[3][i + 1] - self.atit[3][i]) * delt_orbt
-				beta = self.atit[4][i] + (self.atit[4][i + 1] - self.atit[4][i]) * delt_orbt
-				if self.atit[4][i + 1] - self.atit[4][i] > 0:
-					beta = self.atit[4][i] + (self.atit[4][i + 1] - self.atit[4][i] - 360.0 * self.cdr) * delt_orbt
-				break
-		'''
-
-        # step 1 determine the orbit subblock fir each element in he rtims
-        orbt_values = self.orbt1[0]
-        orbt_zones = np.digitize(rtim, orbt_values) - 1  # minus one because digitize gives you zones +1
-        unique_orb_zones = np.unique(orbt_zones)
-
-        for orbt_zone in unique_orb_zones:
-            m = orbt_zones == orbt_zone
-            delta_orbt[m] = (rtim[m] - orbt_values[orbt_zone]) / (orbt_values[orbt_zone + 1] - orbt_values[orbt_zone])
-
-            # sate positions
-            self.sat[0][m] = self.orbt1[8][orbt_zone] + (self.orbt1[8][orbt_zone + 1] - self.orbt1[8][orbt_zone]) * delta_orbt[m]
-            self.sat[1][m] = self.orbt1[9][orbt_zone] + (self.orbt1[9][orbt_zone + 1] - self.orbt1[9][orbt_zone]) * delta_orbt[m]
-            self.sat[2][m] = self.orbt1[10][orbt_zone] + (self.orbt1[10][orbt_zone + 1] - self.orbt1[10][orbt_zone]) * delta_orbt[m]
-
-            self.sitagt[m] = (self.orbt1[14][orbt_zone] + (self.orbt1[14][orbt_zone + 1] - self.orbt1[14][orbt_zone]) * delta_orbt[m]) * self.cdr
-            if self.orbt1[14][orbt_zone + 1] - self.orbt1[14][orbt_zone] < 0:
-                self.sitagt[m] = (self.orbt1[14][orbt_zone] + (self.orbt1[14][orbt_zone + 1] - self.orbt1[14][orbt_zone] + 360.0) * delta_orbt[m]) * self.cdr
-
-            self.sunalp[m] = (self.orbt1[17][orbt_zone] + (self.orbt1[17][orbt_zone + 1] - self.orbt1[17][orbt_zone]) * delta_orbt[m]) * self.cdr
-
-            if self.orbt1[17][orbt_zone + 1] - self.orbt1[17][orbt_zone] > 0:
-                self.sunalp[m] = (self.orbt1[17][orbt_zone] + (self.orbt1[17][orbt_zone + 1] - self.orbt1[17][orbt_zone] - 360.0) * delta_orbt[m]) * self.cdr
-
-            self.sundel[m] = (self.orbt1[18][orbt_zone] + (self.orbt1[18][orbt_zone + 1] - self.orbt1[18][orbt_zone]) *delta_orbt[m]) * self.cdr
-            '''
-			npa[0][0] = self.orbt1[19][orbt_zone]
-			npa[1][0] = self.orbt1[20][orbt_zone]
-			npa[2][0] = self.orbt1[21][orbt_zone]
-			npa[0][1] = self.orbt1[22][orbt_zone]
-			npa[1][1] = self.orbt1[23][orbt_zone]
-			npa[2][1] = self.orbt1[24][orbt_zone]
-			npa[0][2] = self.orbt1[25][orbt_zone]
-			npa[1][2] = self.orbt1[26][orbt_zone]
-			npa[2][2] = self.orbt1[27][orbt_zone]
-			'''
-            # just replace directly, not reason to use npa. for this the atit was moved before the orbt computation, as opposed to the java code to avoid looping again through orbtila zones
-            att2[0][m] = (self.orbt1[19][orbt_zone] * att1[0][m]) + (self.orbt1[22][orbt_zone] * att1[1][m]) + (self.orbt1[25][orbt_zone] * att1[2][m])
-            att2[1][m] = (self.orbt1[20][orbt_zone] * att1[0][m]) + (self.orbt1[23][orbt_zone] * att1[1][m]) + (self.orbt1[26][orbt_zone] * att1[2][m])
-            att2[2][m] = (self.orbt1[21][orbt_zone] * att1[0][m]) + (self.orbt1[24][orbt_zone] * att1[1][m]) + (self.orbt1[27][orbt_zone] * att1[2][m])
-
-
-
-
-            # from pylab import show, imshow, title, colorbar
-        # imshow(rtim.reshape((4800, 4200)))
-        # colorbar()
-        # title('sitagt')
-        # show()
-
-
-        '''
-        for i in range(7):
-            m_ = (rtim > self.orbt1[0][i]) & (rtim < self.orbt1[0][i + 1])
-            # print i, rtim,  self.orbt1[0][i],  self.orbt1[0][i+1], m_
-            # from pylab import show, imshow, title, colorbar
-            # imshow(m_.reshape((3900, 4200)))
-            # colorbar()
-            # title('m_%s' % i)
-            # show()
-            mrtim = rtim[m_]
-            npa = self.mg1110_np(i, rtim, self.orbt1, m_)
-            print i, mrtim.size>0, npa.mean()
-            if np.all(m_):
-                if mrtim.size != rtim.size:  # what happens here?? the npa seems to be som
-                    print 'Inconsistent results are possible! mrtim.size %s rtim.size %s, orbt1[0] size %s for i %s' % (mrtim.size, rtim.size, self.orbt1[0].size, i)
-
-                npa = self.mg1110_np(i, rtim, self.orbt1, m_)
-                print i,  npa
-                # print m_npa.shape
-                break
-        '''
-
-
-
-
-        # print att1
-        # print npa[0][0], npa[0][1], npa[0][2]
-        wksin = np.sin(self.sitagt)
-        wkcos = np.cos(self.sitagt)
-
-        att3[0] = (wkcos * att2[0]) + (wksin * att2[1])
-        att3[1] = (-wksin * att2[0]) + (wkcos * att2[1])
-        att3[2] = att2[2]
-
-        self.sp = self.mg1200_np(att3)
-
-        wkcos = np.cos(self.sundel)
-        self.ss[0] = wkcos * np.cos(self.sunalp)
-        self.ss[1] = wkcos * np.sin(self.sunalp)
-        self.ss[2] = np.sin(self.sundel)
-
-        return beta
-
-
-    def mg1200_np(self, vec):
-
-        vecu = [nan, nan, nan]
-
-        rv1 = (vec[0] * vec[0]) + (vec[1] * vec[1]) + (vec[2] * vec[2])
-        if np.all(rv1 == 0):
-            print ('issue')
-            return vecu
-        rv2 = np.sqrt(rv1)
-        vecu[0] = vec[0] / rv2
-        vecu[1] = vec[1] / rv2
-        vecu[2] = vec[2] / rv2
-        return vecu
-
-    def mg1220_np(self, va, vb):
-
-        vc = [nan, nan, nan]
-
-        vc[0] = (va[1] * vb[2]) - (va[2] * vb[1])
-        vc[1] = (va[2] * vb[0]) - (va[0] * vb[2])
-        vc[2] = (va[0] * vb[1]) - (va[1] * vb[0])
-
-        vd = self.mg1200_np(vc)
-
-        return vd
-
-    def mg1230_np(self, va, vb):
-
-        as1 = (va[0] * vb[0]) + (va[1] * vb[1]) + (va[2] * vb[2])
-        as2 = ((va[0] * va[0]) + (va[1] * va[1]) + (va[2] * va[2])) * (
-            (vb[0] * vb[0]) + (vb[1] * vb[1]) + (vb[2] * vb[2]))
-
-        if np.all(as2 == 0):
-            return as2
-        temp = as1 / np.sqrt(as2)
-        tmask = (temp > 1) & (temp - 1. < 0.000001)
-        temp = np.where(tmask, 1, temp)
-
-        return np.arccos(temp)
-
-    def mg1110(self, i, rtim, orbta):
-        """
-
-        :param i:
-        :param rtim:
-        :param orbta:
-        :return: 3 by 3 array
-        """
-
-        npa  = [[nan for _i in range(3)] for _i in range(3)]
-        aa = []
-        for j in range(6):
-            aa.append( (rtim - orbta[0][j]) / (orbta[0][j+1] - orbta[0][j]))
-        if i != 7:
-            #print 'i sat %d' % i
-            #print 'rtim %.5f' % rtim
-            #print 'orbta[0][%d] %.8f , orbta[0][%d+1] %.8f' % ( i, orbta[0][i], i, orbta[0][i+1])
-            delt = (rtim - orbta[0][i]) / (orbta[0][i+1] - orbta[0][i])
-            #print 'classic delt ', delt
-            self.sat[0] = orbta[8][i] + (orbta[8][i+1] - orbta[8][i]) * delt
-            self.sat[1] = orbta[9][i] + (orbta[9][i+1] - orbta[9][i]) * delt
-            self.sat[2] = orbta[10][i] + (orbta[10][i+1] - orbta[10][i]) * delt
-            #print 'setting sat %.5f, %.5f, %.5f:' %  (self.sat[0], self.sat[1], self.sat[2])
-            self.sitagt = (orbta[14][i] + (orbta[14][i+1] - orbta[14][i]) * delt) * self.cdr
-            if orbta[14][i+1] - orbta[14][i] < 0:
-                self.sitagt = (orbta[14][i] + (orbta[14][i + 1] - orbta[14][i] + 360.0) * delt) * self.cdr
-
-            self.sunalp = (orbta[17][i] + (orbta[17][i + 1] - orbta[17][i]) * delt) * self.cdr
-
-            if orbta[17][i + 1] - orbta[17][i] > 0:
-                self.sunalp = (orbta[17][i] + (orbta[17][i + 1] - orbta[17][i] - 360.0) * delt) * self.cdr
-
-            self.sundel = (orbta[18][i] + (orbta[18][i+1] - orbta[18][i]) * delt) * self.cdr
-
-            npa[0][0] = orbta[19][i]
-            npa[1][0] = orbta[20][i]
-            npa[2][0] = orbta[21][i]
-            npa[0][1] = orbta[22][i]
-            npa[1][1] = orbta[23][i]
-            npa[2][1] = orbta[24][i]
-            npa[0][2] = orbta[25][i]
-            npa[1][2] = orbta[26][i]
-            npa[2][2] = orbta[27][i]
-
-        return npa
-
-    def mg1200(self, vec):
-
-        vecu = [nan, nan, nan]
-        rv1 = (vec[0] * vec[0]) + (vec[1] * vec[1]) + (vec[2] * vec[2])
-        if rv1 == 0:
-            return vecu
-        rv2 = np.sqrt(rv1)
-        vecu[0] = vec[0] / rv2
-        vecu[1] = vec[1] / rv2
-        vecu[2] = vec[2] / rv2
-        return vecu
-
-    def mg1100(self, rtim):
-        """
-        I have no clue , but it seem to do some conversion. Im mcidas check the file gms5_nav.for
-        for further details.
-        :param rtim:
-        :return:
-        """
-        beta = delta = attalp = attdel = wkcos = wksin = 0.
-        att1 = [nan, nan, nan]
-        att2 = [nan, nan, nan]
-        att3 = [nan, nan, nan]
-        npa  = [[nan for _i in range(3)] for _ii in range(3)]
-
-        #print rtim
-        for i in range(7):
-            #print i, rtim,  self.orbt1[0][i],  self.orbt1[0][i+1], rtim > self.orbt1[0][i] and rtim < self.orbt1[0][i+1]
-
-            if rtim > self.orbt1[0][i] and rtim < self.orbt1[0][i+1]:
-                #print 'computing npa', i
-                npa = self.mg1110(i, rtim, self.orbt1)
-                break
-        #print 'npa classic', npa
-        for i in range(9):
-            #print 'atit', i, rtim, self.atit[0][i], self.atit[0][i + 1]
-            if rtim >= self.atit[0][i] and rtim < self.atit[0][i+1]:
-                delt = (rtim - self.atit[0][i]) / (self.atit[0][i + 1] - self.atit[0][i])
-                attalp = self.atit[2][i] + (self.atit[2][i + 1] - self.atit[2][i]) * delt
-                attdel = self.atit[3][i] + (self.atit[3][i + 1] - self.atit[3][i]) * delt
-                beta = self.atit[4][i] + (self.atit[4][i + 1] - self.atit[4][i]) * delt
-                if self.atit[4][i + 1] - self.atit[4][i] > 0:
-                    beta = self.atit[4][i] + (self.atit[4][i + 1] - self.atit[4][i] - 360.0 * self.cdr) * delt
-                break
-        #print beta
-        wkcos = np.cos(attdel)
-        att1[0] = np.sin(attdel)
-        att1[1] = wkcos * -np.sin(attalp)
-        att1[2] =  wkcos * np.cos(attalp)
-        #print wkcos, att1
-
-        att2[0] = (npa[0][0] * att1[0]) + (npa[0][1] * att1[1]) + (npa[0][2] * att1[2])
-        att2[1] = (npa[1][0] * att1[0]) + (npa[1][1] * att1[1]) + (npa[1][2] * att1[2])
-        att2[2] = (npa[2][0] * att1[0]) + (npa[2][1] * att1[1]) + (npa[2][2] * att1[2])
-        #print att1
-        #print npa[0][0], npa[0][1], npa[0][2]
-        wksin = np.sin(self.sitagt)
-        wkcos = np.cos(self.sitagt)
-
-        att3[0] = (wkcos * att2[0]) + (wksin * att2[1])
-        att3[1] = (-wksin * att2[0]) + (wkcos * att2[1])
-        att3[2] = att2[2]
-        self.sp = self.mg1200(att3)
-
-        wkcos = np.cos(self.sundel)
-        self.ss[0] = wkcos * np.cos(self.sunalp)
-        self.ss[1] = wkcos * np.sin(self.sunalp)
-        self.ss[2] = np.sin(self.sundel)
-
-        return beta
-
-
-    def mg1220(self, va, vb):
-        vc = [nan, nan, nan]
-
-        vc[0] = (va[1] * vb[2]) - (va[2] * vb[1])
-        vc[1] = (va[2] * vb[0]) - (va[0] * vb[2])
-        vc[2] = (va[0] * vb[1]) - (va[1] * vb[0])
-
-        vd = self.mg1200(vc)
-
-        return vd
-
-
-    def mg1210(self, va, vb):
-
-        vc = [nan, nan, nan]
-        vc[0] = (va[1] * vb[2]) - (va[2] * vb[1])
-        vc[1] = (va[2] * vb[0]) - (va[0] * vb[2])
-        vc[2] = (va[0] * vb[1]) - (va[1] * vb[0])
-        return vc
-
-    def mg1230(self, va, vb):
-
-        as1 = (va[0] * vb[0]) + (va[1] * vb[1]) + (va[2] * vb[2])
-        as2 = ((va[0] * va[0]) + (va[1] * va[1]) + (va[2] * va[2])) * ((vb[0] * vb[0]) + (vb[1] * vb[1]) + (vb[2] * vb[2]))
-
-        if as2 ==0:
-            return as2
-        temp = as1/np.sqrt(as2)
-        if temp > 1 and temp-1. < 0.000001:
-            temp = 1
-        return np.arccos(temp)
 
 
 
