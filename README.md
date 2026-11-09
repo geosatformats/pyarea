@@ -5,7 +5,11 @@ Pyarea is a Python package that reads data in the SSEC McIDAS AREA format.
 The navigation is a port of the `edu.wisc.ssec.mcidas` Java package: 
 it mostly mimics its structure and logic, with a few exceptions 
 imposed by practical aspects of the Python language. Some additional, 
+<<<<<<< HEAD
 more efficient methods were added that work on jumpy arrays 
+=======
+more efficient methods were added that work on numpy arrays 
+>>>>>>> 47263c5 (More refurbishing)
 (`to_latlon`, `to_lin_ele`).
 
 ## Installation
@@ -69,10 +73,15 @@ The calibration is **not** a port of the Java package, and comes in two parts:
   `CalibratorGvar`.
 * `GOESCalibrator` (SMS and GOES-1 to 7) is new code, as the Java package does 
   not read these data. It covers Mode A (VISR), Mode AA (VAS, GOES-4 to 6) and 
+<<<<<<< HEAD
   Mode AAA (VAS, GOES-6 and 7), with `read_ir_temperature_a`,
   `read_ir_temperature_aa` and `read_ir_temperature_aaa` on the file. The visible 
   channel only has a relative reflectance, there is no calibration to albedo for 
   these satellites.
+=======
+  Mode AAA (VAS, GOES-6 and 7). The visible channel only has a relative reflectance, 
+  there is no calibration to albedo for these satellites.
+>>>>>>> 47263c5 (More refurbishing)
 
 ## License
 
