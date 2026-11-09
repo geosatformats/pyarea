@@ -8,13 +8,9 @@ version = "0.2.0.dev0"
 description = "Reader for McIDAS AREA files (python port of edu.wisc.ssec.mcidas)"
 readme = "README"
 license = { text = "LGPL-3.0-or-later" }
-<<<<<<< HEAD
-authors = [{ name = "Ioan Ferencik" }]
-=======
 authors = [{ name = "Ioan Ferencik", email = "ferencikioan@gmail.com" },
 	   { name = "Kin Largadas" }
 	  ]
->>>>>>> 597c919 (Update pyproject.toml)
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "numba", "pyproj"]
 
