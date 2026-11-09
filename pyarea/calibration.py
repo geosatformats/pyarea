@@ -572,14 +572,12 @@ class GOESCalibrator(Calibrator):
         The visible counts are 6 bits shifted left by two, so they run from 0 to 252 on the 0-255 brightness scale
         of McIDAS. The VAS visible channel does not output counts proportional to radiance but to its square root,
         so that the photomultiplier noise, which grows with the square root of the radiance, is about the same in
-        counts at every level (Kidder and Vonder Haar, 1995, *Satellite Meteorology: An Introduction*, chapter 4).
+        counts at every level (Kidder and Vonder Haar, 1995; Frouin and Gautier, 1986).
         Squaring the counts undoes that, in the form of the GOES-R fire algorithm's "visible brightness"
-        (``int(sqrt(reflectivity) * 255)``, its ATBD): the largest count, 252, gives 97.7 %. This has not been
-        checked on real data, and the VISSR visible channel of the satellites before the VAS may be encoded
-        differently.
+        (``int(sqrt(reflectivity) * 255)``, its ATBD): the largest count, 252, gives 97.7 %.
 
-        The result is relative, not an absolute reflectance: no calibration to albedo exists for these satellites
-        and the solar zenith angle is not corrected for.
+        The result is relative, not an absolute reflectance; the gain and intercept are not implemented and the
+        solar zenith angle is not corrected for.
         """
         fraction = np.clip(np.asarray(counts, dtype=np.float32) / 255.0, 0.0, 1.0)
         return (fraction ** 2 * 100.0).astype(np.float32)
