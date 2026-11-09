@@ -26,10 +26,11 @@ def main(argv):
         nums = [float(x) for x in rest[1:]]
         for lat, lon in zip(nums[0::2], nums[1::2]):
             elem, line = area.navigation.toLinEle([[lat], [lon]])  # image coordinates, [[elements], [lines]]
-            row = (float(line[0]) - d.line_ul) / d.line_res
-            col = (float(elem[0]) - d.element_ul) / d.element_res
-            print(f"lat {lat} lon {lon} -> image line {float(line[0]):.1f} elem {float(elem[0]):.1f} "
-                  f"-> row {row:.1f} col {col:.1f}")
+            # the navigation already accounts for the file's start and resolution; its line/element are 1-based
+            row = float(line[0]) - 1
+            col = float(elem[0]) - 1
+            print(f"lat {lat} lon {lon} -> line {float(line[0]):.1f} elem {float(elem[0]):.1f} "
+                  f"-> row {row:.1f} col {col:.1f} (array is {area.lines} x {area.elements})")
             pixels.append((int(round(row)), int(round(col))))
     else:
         pixels = [(int(a), int(b)) for a, b in zip(rest[0::2], rest[1::2])]
