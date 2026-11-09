@@ -1,12 +1,14 @@
 # Pyarea
 
-Pyarea is a Python package to read data from the VISSR, VAS and/or GVAR 
-instruments onboard the GOES satellites in McIDAS AREA format.
+Pyarea is a Python package that can read data in the SSEC McIDAS AREA format.
 
-A python port of the edu.wisc.ssec.mcidas Java package, it mostly mimics
-its structure and logic with a few exceptions imposed by practical aspects
+A port of the edu.wisc.ssec.mcidas Java package, it mostly mimics its 
+structure and logic with a few exceptions imposed by practical aspects 
 of Python language. Some additional more efficient functions were added
 (toLineEle2, toLatLon2) to perform navigation and work with numpy arrays.
+
+It currently supports reading old GOES AREA files (GOESNav and GVARNav), 
+although GMSXNav and RECTNav is also ported.
 
 ## Documentation
 
