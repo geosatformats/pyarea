@@ -92,7 +92,7 @@ def test_block_with_words_swapped_by_a_little_endian_writer_is_still_read(block,
     assert other.to_latlon([5000.0], [4582.0])[0][0] == pytest.approx(nav.to_latlon([5000.0], [4582.0])[0][0])
 
 
-def test_area_file_navigation_counts_from_one_and_does_not_flip(tmp_path, block):
+def test_area_file_navigation_counts_from_zero_and_does_not_flip(tmp_path, block):
     from pyarea.file import AreaFile
     from tests.fake_area_files import FakeArea, mode_a_data, write_area_file
 
@@ -105,10 +105,10 @@ def test_area_file_navigation_counts_from_one_and_does_not_flip(tmp_path, block)
     area.areaNav = None
     nav = area.navigation
     assert isinstance(nav, GMSXNav)
-    assert (nav.startLine, nav.startElement) == (1, 1)
+    assert (nav.startLine, nav.startElement) == (0, 0)
     assert not nav.isFlippedLineCoordinates()
-    # array line 1, element 1 is image line 712 + 4 * 0, element -415: well off the Earth of this synthetic block;
-    # a point of the Earth comes back to the array position it came from
+    # a point on the Earth of this synthetic block
+    # comes back to the array position it came from
     lat, lon = nav.to_latlon([1000.0], [900.0])
     line, elem = nav.to_lin_ele(lat, lon)
     if np.isfinite(lat[0]):

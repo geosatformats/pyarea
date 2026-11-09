@@ -12,7 +12,7 @@ from pyarea.calibration import (
     cal_type_from_name,
 )
 from pyarea.directory import DIRECTORY_BYTES, area_directory
-from pyarea.nav import AreaNav, GMSXNav
+from pyarea.nav import AreaNav
 from pyarea.utils import INT32SIZE
 
 _, name = os.path.split(__file__)
@@ -235,11 +235,10 @@ class AreaFile(BytesIO):
             nav.setImageStart(self.directory.line_ul, self.directory.element_ul)
             nav.setRes(*self.resolution)
             nav.setMag(1, 1)
-            # VisAD's GMSXnav counts AREA lines and elements from 1. Its test also flips the lines, but the
-            # lines of real GMS-5 AREA files already run north to south, so that flip is left out (checked
-            # by overlaying coastlines on a GMS-5 image).
-            first = 1 if isinstance(nav, GMSXNav) else 0
-            nav.setStart(first, first)
+            # AREA lines and elements are counted from 0 here, for every navigation (GMS-5 included, as in the Satpy
+            # reader). VisAD's GMSXnav test counts from 1 and flips the lines, but the lines of real GMS-5 AREA files
+            # already run north to south, so there is no flip (checked by overlaying coastlines on a GMS-5 image).
+            nav.setStart(0, 0)
             self.areaNav = nav
         return self.areaNav
 
