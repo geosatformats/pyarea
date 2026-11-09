@@ -448,7 +448,10 @@ class AreaFile(BytesIO):
         return self.gvar_calibrator.calibrate_array(self.read_data(), band, out)
 
     def read_vis(self, calibration='counts'):
-        """VIS counts, or ``calibration='unnormalized_reflectance'`` for a linear rescale to percent (0-100)."""
+        """VIS counts, or ``calibration='unnormalized_reflectance'`` for a relative reflectance in percent (0-100).
+
+        The counts are squared, see ``GOESCalibrator.vis_unnormalized_reflectance``.
+        """
         if self.directory.band != 'VIS':
             raise ValueError(f'{self.source}: band is {self.directory.band!r}, not VIS.')
         counts = self.read_data().astype(np.float32)

@@ -103,10 +103,12 @@ class TestModeA:
         np.testing.assert_array_equal(AreaFile(mode_a_vis_file).read_vis()[NADIR_ROW, :6], [0, 4, 128, 252, 252, 255])
 
     def test_unnormalized_reflectance(self, mode_a_vis_file):
-        """Scale the 6-bit counts to percent and clip to 0-100."""
-        expected = np.clip(np.array([0, 4, 128, 252, 252, 255]) / 252.0 * 100.0, 0, 100)
+        """The 6-bit counts are squared (they are about the square root of the radiance), as percent, clipped."""
+        expected = np.clip(np.array([0, 4, 128, 252, 252, 255]) / 255.0, 0, 1) ** 2 * 100.0
         res = AreaFile(mode_a_vis_file).read_vis("unnormalized_reflectance")
         np.testing.assert_allclose(res[NADIR_ROW, :6], expected, rtol=1e-6)
+        assert res[NADIR_ROW, 2] == pytest.approx((128 / 255) ** 2 * 100.0, rel=1e-6)  # about 25.2 %
+        assert res[NADIR_ROW, 3] == pytest.approx((252 / 255) ** 2 * 100.0, rel=1e-6)  # the largest count, 97.7 %
 
     def test_single_band_read_of_a_multiband_file(self, goes7_aaa_file):
         """Multiband files are read per channel."""

@@ -567,11 +567,22 @@ class GOESCalibrator(Calibrator):
 
     @staticmethod
     def vis_unnormalized_reflectance(counts):
-        """VIS counts to percent: a linear rescale of the 6-bit encoding (max count 252), clipped to 0-100.
+        """VIS counts to a relative reflectance in percent: ``(counts / 255) ** 2 * 100``, clipped to 0-100.
 
-        This is relative, not an absolute reflectance: no calibration to albedo exists for these satellites.
+        The visible counts are 6 bits shifted left by two, so they run from 0 to 252 on the 0-255 brightness scale
+        of McIDAS. The VAS visible channel does not output counts proportional to radiance but to its square root,
+        so that the photomultiplier noise, which grows with the square root of the radiance, is about the same in
+        counts at every level (Kidder and Vonder Haar, 1995, *Satellite Meteorology: An Introduction*, chapter 4).
+        Squaring the counts undoes that, in the form of the GOES-R fire algorithm's "visible brightness"
+        (``int(sqrt(reflectivity) * 255)``, its ATBD): the largest count, 252, gives 97.7 %. This has not been
+        checked on real data, and the VISSR visible channel of the satellites before the VAS may be encoded
+        differently.
+
+        The result is relative, not an absolute reflectance: no calibration to albedo exists for these satellites
+        and the solar zenith angle is not corrected for.
         """
-        return np.clip(np.asarray(counts, dtype=np.float32) / 252.0 * 100.0, 0.0, 100.0)
+        fraction = np.clip(np.asarray(counts, dtype=np.float32) / 255.0, 0.0, 1.0)
+        return (fraction ** 2 * 100.0).astype(np.float32)
 
     @classmethod
     def mode_aa_code_to_band(cls, codes):
