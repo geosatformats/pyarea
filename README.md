@@ -23,7 +23,7 @@ It is lightweight and initializes lazily: the data are only read on request,
 and come back as a 3D numpy array (use `squeeze` for a 2D one).
 
 ```python
-from pyarea.file import AreaFile
+from pyarea import AreaFile
 
 area = AreaFile("path/to/file.AREA")
 print(area)                     # the directory
