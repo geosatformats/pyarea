@@ -9,10 +9,9 @@ __author__ = 'jano'
 """
 
 import math
-import pyproj
+
 import numpy as np
-
-
+import pyproj
 
 
 def lc2YX(l=None,c=None,gt=None):
@@ -106,4 +105,3 @@ def reproject_geos_2_latlon(array_in=None, bbox=None, ssp=None, gt=None):
     l, c = ll2lc(lat=lats, lon=lons, gt=gt, ssp=ssp)
 
     return  array_in[l,c]
-

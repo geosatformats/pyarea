@@ -1,9 +1,20 @@
-import numpy as np
+import ctypes as C
 import datetime
 import struct
-import ctypes as C
+
+import numpy as np
+
 #binary values representing a missing value in McIDAS
 MCMISSING = int('0x80808080', 16)
+
+
+def is_mcmissing(word):
+    """True if a 32-bit directory or navigation word is the McIDAS "missing" value.
+
+    ``MCMISSING`` is the unsigned bit pattern, but the words of a block are usually read as signed integers, where
+    the same pattern is -2139062144; both are recognised.
+    """
+    return (int(word) & 0xFFFFFFFF) == MCMISSING
 INT32SIZE = np.int32().itemsize
 
 def yyyddd_hhmmss2datetime(yyyddd, hhmmss ):
@@ -54,6 +65,17 @@ def yyyddd_hhmmss2datetime(yyyddd, hhmmss ):
     month, day = get_month_day(year, yday, True)
     return datetime.datetime(year, month, day,hour=hh,minute=mm,second=ss)
 
+def timdif(yrday1, hms1, yrday2, hms2):
+    """Minutes from the first date and time to the second, as McIDASUtil.timdif.
+
+    The days are YYDDD or YYYYDDD, counted from 1900 as in a directory (see ``yyyddd_hhmmss2datetime``),
+    the times HHMMSS.
+    """
+    first = yyyddd_hhmmss2datetime(yrday1, hms1)
+    second = yyyddd_hhmmss2datetime(yrday2, hms2)
+    return (second - first).total_seconds() / 60.0
+
+
 def get_month_day(year, day, one_based=False):
         if one_based:  # if Jan 1st is 1 instead of 0
                 day -= 1
@@ -82,7 +104,8 @@ def gould2native(number):
         #the input is an 4 byte int of a hexadecimal float in Gould format
         #we need to prepare byte masks in order to extract the most significant byte (byte 4)
         # as well the first three bytes. I am not sure but my feeling is that OGE doc implies Gould is
-        #big endian byte order and thus the section 3.5.4 labels bytes in an opposite way (byte1 is the most significant byte)
+        #big endian byte order and thus the section 3.5.4 labels bytes in an opposite way
+        #(byte1 is the most significant byte)
         #however the nav header is in Little endian and I use its labeling for bytes
         #prepare masks
         byte012_mask = int('0xffffff',16) # 0000 0000 1111 1111 1111 1111 1111 1111
@@ -107,21 +130,26 @@ def gould2native(number):
         return nativeVal
 
 def mcPI2F(value):
-    val = -value if value < 0 else value
-    fvalue = float(val/10000) + float((val/100) % 100) / 60. + (val % 100) / 3600.
+    """Packed integer (SDDDMMSS for degrees, HHMMSS for hours) to a float, as McIDASUtil.mcPackedIntegerToDouble."""
+    val = abs(int(value))
+    fvalue = val // 10000 + (val // 100 % 100) / 60. + (val % 100) / 3600.
     return -fvalue if value < 0 else fvalue
 
+
 def mcF2PI(value):
-    fval = -value if value < 0 else value
-    j = int(3600*fval + .5)
-    val = 10000 * (j/3600) + 100 * ((j/60) % 60 ) + j % 60
+    """Float degrees (or hours) to a packed integer, rounded to whole seconds, as McIDASUtil.mcDoubleToPackedInteger."""
+    j = int(3600 * abs(value) + .5)
+    val = 10000 * (j // 3600) + 100 * (j // 60 % 60) + j % 60
     return -val if value < 0 else val
 
+
 def leapyear(year):
-    return 366 - ((year%4) + 3)/4
+    """Days in a year, with the McIDAS rule of a leap year every fourth year (right from 1901 to 2099)."""
+    return 366 - ((year % 4) + 3) // 4
 
 
-_field_names_ = names = 'year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1'
+_field_names_ = names = ('year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10',
+                         'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1')
 
 _field_types_ = [C.c_uint8]* len(_field_names_)
 class BCDDateTime(C.BigEndianStructure, ):
@@ -164,40 +192,38 @@ class BCDDateTime(C.BigEndianStructure, ):
 
         return d
 
-def bcdtime2datetime(bytes=None, byte_order=None):
+_BCD_NAMES = ('year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1',
+              'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1')
+
+
+def bcd_words_to_datetime(word1, word2):
+    """Decode a BCD time stored in two 32-bit words, as ``YYYYDDDH`` and ``HMMSSmmm`` hexadecimal digits.
+
+    The words are integers, i.e. already decoded in the byte order of the file they came from, so this does not
+    depend on that byte order. ``0x19962562, 0x14515000`` is 1996 day 256 (September 12), 21:45:15.000.
     """
-            Converts BCD time represented as binary string in 8 8-bit words to a python datetime, in BIG endian
-            goddamnit.
-
-
-    """
-    assert byte_order is not None, 'byte_order has to be supplied'
-
-    if byte_order != '>':
-        lb = len(bytes)
-        big_end_bytes = struct.unpack('>%dB' % lb, struct.pack('%s%dB' % (byte_order, lb), *bytes))
-    else:
-        big_end_bytes = bytes
-
-
-    names = 'year_1000', 'year_100', 'year_10', 'year_1', 'day_100', 'day_10', 'day_1', 'hour_10', 'hour_1', 'min_10', 'min_1', 'sec_10', 'sec_1', 'msec_100', 'msec_10', 'msec_1'
-
-    values = list()
-    for byte in big_end_bytes:
-            for val in (byte >> 4, byte & 15):  # split in 2 nibbles, use shift by 4 and bitwise & 15 to get the values
-                    values.append(val)
-    d = dict(zip(names, values))
-    # compose year
+    chars = struct.pack('>2I', int(word1) & 0xFFFFFFFF, int(word2) & 0xFFFFFFFF)
+    nibbles = [value for byte in chars for value in (byte >> 4, byte & 15)]
+    d = dict(zip(_BCD_NAMES, nibbles))
     year = d['year_1000'] * 1000 + d['year_100'] * 100 + d['year_10'] * 10 + d['year_1']
     yday = d['day_100'] * 100 + d['day_10'] * 10 + d['day_1']
     month, day = get_month_day(year, yday, True)
     hour = d['hour_10'] * 10 + d['hour_1']
     minute = d['min_10'] * 10 + d['min_1']
     second = d['sec_10'] * 10 + d['sec_1']
-    milisecond = d['msec_100'] * 100 + d['msec_10'] * 10 + d['msec_1']
-    #i milisec = 1000 microseconds, python does NOT have miliseconds
-    #print year, yday, hour, minute, second, milisecond
-    return datetime.datetime(year, month, day, hour, minute, second, milisecond*1000) # to convert mniliseconds to microseconds
+    millisecond = d['msec_100'] * 100 + d['msec_10'] * 10 + d['msec_1']
+    return datetime.datetime(year, month, day, hour, minute, second, millisecond * 1000)  # microseconds
+
+
+def bcdtime2datetime(bytes=None, byte_order=None):
+    """Convert a BCD time given as the 8 bytes it occupies in a file (two 32-bit words) to a datetime.
+
+    ``byte_order`` is the byte order of the file's 32-bit words, ``'>'`` or ``'<'``. The bytes of each word are in
+    that order, so in a little-endian file the digits of each word appear reversed.
+    """
+    assert byte_order in ('>', '<'), 'byte_order has to be supplied, as > or <'
+    word1, word2 = struct.unpack(f'{byte_order}2I', bytearray(bytes))
+    return bcd_words_to_datetime(word1, word2)
 
 
 def julday(month, day, year, hour=0, minute=0, second=0):

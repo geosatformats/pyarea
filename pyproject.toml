@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyarea"
+version = "0.2.0.dev0"
+description = "Reader for McIDAS AREA files (python port of edu.wisc.ssec.mcidas)"
+readme = "README"
+license = { text = "LGPL-3.0-or-later" }
+authors = [{ name = "Ioan Ferencik", email = "ferencikioan@gmail.com" },
+	   { name = "Kin Largadas" }
+	  ]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "numba", "pyproj"]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+
+[tool.setuptools]
+packages = ["pyarea", "pyarea.navigation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# the projection modules use the (l, c) names of the HRIT and CGMS documents, also as keyword arguments, and have not
+# been reworked yet
+"pyarea/navigation/*" = ["E741", "E501", "E402"]
