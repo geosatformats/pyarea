@@ -485,8 +485,9 @@ class AreaFile(BytesIO):
         lines = np.arange(self.lines) if lines is None else lines
         elems = np.arange(self.elements) if elems is None else elems
         line_grid, elem_grid = np.meshgrid(lines, elems, indexing='ij')
-        # file coordinates are 1-based in McIDAS; the navigation adds the ul line/element and resolution itself
-        lat, lon = nav.to_latlon(line_grid + 1, elem_grid + 1)
+        # file lines and elements are counted from 0 here, as in VisAD's GOESnav; the navigation adds the ul
+        # line/element and the resolution itself. (Earlier versions added 1, which moved every pixel by one.)
+        lat, lon = nav.to_latlon(line_grid, elem_grid)
         return lon, lat
 
     def __str__(self):
