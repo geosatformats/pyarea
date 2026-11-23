@@ -1,5 +1,6 @@
 import numpy as np
-from  pyarea.navigation import hrit_navigation as hnav
+
+from pyarea.navigation import hrit_navigation as hnav
 from pyarea.navigation import proj4_navigation as pnav
 
 
@@ -180,5 +181,3 @@ def reproject_area2geos(af=None, out_resolution=2000, out_ssp=None, use_proj_nav
         return out_geos_data
     finally:
         af.close() # the close functin does nothing in case the pyarea file is not opened form a file, perhaps it should clear the memory. However python  does not guarantee that "del" operator does the job of dealocationg when invoked
-
-

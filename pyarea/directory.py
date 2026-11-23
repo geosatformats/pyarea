@@ -1,17 +1,19 @@
 import ctypes as C
 import logging
 import os
+import struct
 import typing
-import sys
+
+import numpy as np
+
+from pyarea.sensors import SENSORS, get_sensor
 from pyarea.utils import yyyddd_hhmmss2datetime
 
 _, n = os.path.split(os.path.abspath(__file__))
 logger = logging.getLogger(n)
 
-
-
-import struct
-
+# the sensor names indexed by sensor number ("" where a number is not used)
+_SENSOR_NAMES = tuple(SENSORS[n].name if n in SENSORS else "" for n in range(max(SENSORS) + 1))
 
 # http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#13797
 HEADER_FIELDS = (
@@ -80,167 +82,12 @@ HEADER_FIELDS = (
 )
 
 
-class area_directory(C.BigEndianStructure):
-    _pack_ = 1
-    _fields_ = HEADER_FIELDS
+class _DirectoryMixin:
+    """Behaviour shared by the big- and little-endian directory structures."""
 
-    sensors = (
-    "Derived Data",
-    "Test Patterns",
-    "Graphics",
-    "Miscellaneous",
-    "PDUS Meteosat visible",
-    "PDUS Meteosat infrared",
-    "PDUS Meteosat water vapor",
-    "Radar",
-    "Miscellaneous Aircraft Data",
-    "Raw Meteosat",
-    "Composite image",
-    "Topography image",
-    "GMS visible",
-    "GMS infrared",
-    "ATS 6 visible",
-    "ATS 6 infrared",
-    "SMS-1 visible",
-    "SMS-1 infrared",
-    "SMS-2 visible",
-    "SMS-2 infrared",
-    "GOES-1 visible",
-    "GOES-1 infrared",
-    "GOES-2 visible",
-    "GOES-2 infrared",
-    "GOES-3 visible",
-    "GOES-3 infrared",
-    "GOES-4 visible (VAS)",
-    "GOES-4 infrared and water vapor (VAS)",
-    "GOES-5 visible (VAS)",
-    "GOES-5 infrared and water vapor (VAS)",
-    "GOES-6 visible",
-    "GOES-6 infrared",
-    "GOES-7 visible, Block 1 supplemental data",
-    "GOES-7 infrared",
-    "FY-2B",
-    "FY-2C",
-    "FY-2D",
-    "FY-2E",
-    "FY-2F",
-    "FY-2G",
-    "FY-2H",
-    "TIROS-N (POES)",
-    "NOAA-6", "NOAA-7",
-    "NOAA-8", "NOAA-9",
-    "Venus",
-    "Voyager 1",
-    "Voyager 2",
-    "Galileo",
-    "Hubble space telescope",
-    "MSG-1",
-    "MSG-2",
-    "MSG-3",
-    "Meteosat-3",
-    "Meteosat-4",
-    "Meteosat-5",
-    "Meteosat-6",
-    "Meteosat-7",
-    "",
-    "NOAA-10",
-    "NOAA-11",
-    "NOAA-12",
-    "NOAA-13",
-    "NOAA-14",
-    "NOAA-15",
-    "NOAA-16",
-    "NOAA-17",
-    "NOAA-18",
-    "NOAA-19",
-    "GOES 8 imager",  # 70
-    "GOES 8 sounder",
-    "GOES 9 imager",
-    "GOES 9 sounder",
-    "GOES 10 imager",
-    "GOES 10 sounder",
-    "GOES 11 imager",
-    "GOES 11 sounder",
-    "GOES 12 imager",
-    "GOES 12 sounder",
-    "ERBE",
-    "",
-    "GMS-4",
-    "GMS-5",
-    "GMS-6",
-    "GMS-7",
-    "GMS-8",
-    "DMSP F-8",
-    "DMSP F-9",
-    "DMSP F-10",
-    "DMSP F-11",
-    "DMSP F-12",
-    "DMSP F-13",
-    "DMSP F-14",
-    "DMSP F-15",  # 94
-    "FY-1B",
-    "FY-1C",
-    "FY-1D",
-    "",
-    "",
-    "",
-    "TERRA L1B",  # 101
-    "TERRA CLD",
-    "TERRA GEO",
-    "TERRA-AER",
-    "",
-    "TERRA TOP",
-    "TERRA ATM",
-    "TERRA GUE",
-    "TERRA RET",
-    "",
-    "AQUA L1B",# 111
-    "AQUA CLD",
-    "AQUA GEO",
-    "AQUA AER",
-    "",
-    "AQUA TOP",
-    "AQUA ATM",
-    "AQUA GUE",
-    "AQUA RET",
-    "",  # 120
-    "", "", "", "", "", "", "", "", "", "",  # 130
-    "", "", "", "", "", "", "", "", "", "",  # 140
-    "", "", "", "", "", "", "", "", "", "",  # 150
-    "", "", "", "", "", "", "", "", "",
-    "TERRA NDVI",  # 160
-    "TERRA CREF",
-    "", "", "", "", "", "", "", "",
-    "AQUA NDVI",  # 170
-    "AQUA CREF",
-    "", "", "", "", "", "", "", "",
-    "GOES 13 imager",  # 180
-    "GOES 13 sounder",
-    "GOES 14 imager",
-    "GOES 14 sounder",
-    "GOES 15 imager",
-    "GOES 15 sounder",
-    "GOES 16 imager",
-    "GOES 16 sounder",
-    "",  # 188
-    "", "",  # 190
-    "", "", "", "", "DMSP F-16",  # 195
-    "DMSP F-17",
-    "", "", "",  # 199
-    "AIRS L1B",  # 200
-    "", "", "", "", "", "", "", "", "",
-    "AMSR-E L1B",  # 210
-    "AMSR-E RAIN",
-    "", "", "", "", "", "", "", "", "",  # 220
-    "", "", "", "", "", "", "", "", "",
-    "Kalpana-1",  # 230
-    "", "", "", "", "", "", "", "", "",
-    "MetOp-A",  # 240
-    "MetOp-B",
-    "MetOp-C",
-    "")
+    sensors = _SENSOR_NAMES
 
-    def __init__(self, dir_bytes=None):
+    def _setup(self, dir_bytes):
         self.dir_bytes = dir_bytes
         self.nominal_time = yyyddd_hhmmss2datetime(self.yyyddd, self.hhmmss)
         self.creation_time = yyyddd_hhmmss2datetime(self.file_yyyddd, self.file_hhmmss)
@@ -268,53 +115,9 @@ class area_directory(C.BigEndianStructure):
         self.comment_cards = list() if self.comment_count > 0 else None
 
 
-    def __new__(cls, dir_bytes=None):
-
-        endianness_test_value = struct.unpack('>i', dir_bytes[4:8])[0]
-        if endianness_test_value == 4:
-            sup_cls = C.BigEndianStructure
-            cls.byte_order = '>'
-        else:
-            sup_cls = C.LittleEndianStructure
-            cls.byte_order = '<'
-        cls.__bases__ = tuple([sup_cls])
-
-        #cls = type(cls.__name__, (sup_cls, area_directory),{'_pack_': cls._pack_, '_fields_': cls._fields_})
-
-        inst = cls.from_buffer_copy(dir_bytes)
-
-        return inst
-
-
-    # def __new__(cls, dir_bytes=None):
-    #
-    #     file_is_big_endian = struct.unpack('>i', dir_bytes[4:8])[0] == 4
-    #     sys_byte_order = sys.byteorder
-    #     if sys_byte_order == 'little':
-    #         if file_is_big_endian:
-    #             sup_cls = C.BigEndianStructure
-    #             cls.byte_order = '>'
-    #             cls = type(cls.__name__, (sup_cls, area_directory), {'_pack_': cls._pack_, '_fields_': cls._fields_})
-    #             inst = cls.from_buffer_copy(dir_bytes)
-    #         else:
-    #             cls.byte_order = '<'
-    #             inst = area_directory.from_buffer_copy(dir_bytes)
-    #     else:
-    #         if file_is_big_endian:
-    #             cls.byte_order = '>'
-    #             inst = area_directory.from_buffer_copy(dir_bytes)
-    #         else:
-    #             sup_cls = C.LittleEndianStructure
-    #             cls.byte_order = '<'
-    #             cls = type(cls.__name__, (sup_cls, area_directory), {'_pack_': cls._pack_, '_fields_': cls._fields_})
-    #             inst = cls.from_buffer_copy(dir_bytes)
-    #
-    #     return inst
-
-
-
     def __eq__(self, other):
-        return self.nominalTime == other.nominalTime and self.imgbox == other.imgbox and self.byte_depth == other.byte_depth
+        return (self.nominalTime == other.nominalTime and self.imgbox == other.imgbox
+                and self.byte_depth == other.byte_depth)
 
 
     @property
@@ -327,7 +130,8 @@ class area_directory(C.BigEndianStructure):
     def __str__(self):
 
         r = f'\n{"-"*35} \n' \
-            f'{self.sensor} {self.cal_type.decode().strip()} {self.source_type.decode().strip()} image scanned at {self.start_time}\n' \
+            f'{self.sensor} {self.cal_type.decode().strip()} {self.source_type.decode().strip()} '\
+            f'image scanned at {self.start_time}\n' \
             f'{"-"*35}\n' \
             f'Nominal time: {self.nominal_time}\n'\
             f'Bands: {self.bands}\n'\
@@ -338,7 +142,7 @@ class area_directory(C.BigEndianStructure):
             f'Bounding box: {self.imgbox}\n'
 
         if self.comment_cards:
-            r+= f'Comment cards:\n'
+            r+= 'Comment cards:\n'
             for cc in self.comment_cards:
                 r+= f'\t{cc}\n'
         return r
@@ -354,7 +158,7 @@ class area_directory(C.BigEndianStructure):
             try:
                 try:
                     card_name, sval = card_txt.split('=')
-                except Exception as e:
+                except Exception:
                     self.comment_cards.append(str(card_txt))
                     continue
 
@@ -396,7 +200,8 @@ class area_directory(C.BigEndianStructure):
 
     @property
     def id_text(self):
-        return f'{self.sensor} {self.cal_type.decode()} {self.source_type.decode()} image scanned at {self.start_time}\n'
+        return (f'{self.sensor} {self.cal_type.decode()} {self.source_type.decode()} '
+                f'image scanned at {self.start_time}\n')
 
     @property
     def size(self):
@@ -428,17 +233,40 @@ class area_directory(C.BigEndianStructure):
         return start_line, end_line, start_elem, end_elem
 
     @property
+    def sensor_name(self):
+        """The full name for the sensor/source number, e.g. ``GOES-3 infrared`` (empty if unknown)."""
+        number = self.sensor_source_number
+        return self.sensors[number] if 0 <= number < len(self.sensors) else ""
+
+    @property
+    def sensor_info(self):
+        """The :class:`pyarea.sensors.Sensor` for this file's sensor number, or None if it is not in the table."""
+        return get_sensor(self.sensor_source_number)
+
+    @property
     def sensor(self):
-        space = ' '
-        text = self.sensors[self.sensor_source_number]
-        if space in text:
-            stext = text.split(space)
+        """Short platform name, e.g. ``GOES-3`` or ``GOES8`` (None if there isn't one)."""
+        if 16 <= self.sensor_source_number <= 33:  # SMS-1 to GOES-7
+            return self.satellite
+        text = self.sensor_name
+        if ' ' in text:
+            stext = text.split(' ')
             if 'GOES' in stext:
                 return ''.join(stext[:2])
         else:
             return text
 
+    @property
+    def satellite(self):
+        """The platform name from the sensor table (``SMS-1``, ``GOES-3``, ``NOAA-15``...), or None."""
+        info = self.sensor_info
+        return None if info is None else info.platform
 
+    @property
+    def band(self):
+        """``VIS`` or ``IR`` for visible and infrared sensors in the sensor table, otherwise None."""
+        info = self.sensor_info
+        return None if info is None else info.band
 
     @property
     def ssp(self):
@@ -461,6 +289,64 @@ class area_directory(C.BigEndianStructure):
             return unit_options[self.units]
 
 
+class _AreaDirectoryBE(_DirectoryMixin, C.BigEndianStructure):
+    _pack_ = 1
+    _layout_ = "ms"  # what Python used implicitly; spelled out since 3.14 deprecates the default
+    _fields_ = HEADER_FIELDS
 
 
+class _AreaDirectoryLE(_DirectoryMixin, C.LittleEndianStructure):
+    _pack_ = 1
+    _layout_ = "ms"  # what Python used implicitly; spelled out since 3.14 deprecates the default
+    _fields_ = HEADER_FIELDS
 
+
+_DIRECTORY_CLASSES = {'>': _AreaDirectoryBE, '<': _AreaDirectoryLE}
+DIRECTORY_BYTES = 256
+
+
+def _directory_plausibility(words):
+    """Score how plausible a directory is when its 64 words are read in one byte order."""
+    names = _DirectoryMixin.sensors
+    sensor, lines, elements = int(words[2]), int(words[8]), int(words[9])
+    score = 10 if 0 <= sensor < len(names) and names[sensor] else 0
+    score += 5 * (int(words[1]) == 4)  # the AREA version number
+    return score + int(0 < lines < 200000) + int(0 < elements < 200000)
+
+
+def detect_byte_order(dir_bytes):
+    """Return ``'>'`` or ``'<'``, whichever reads the directory as the more plausible one.
+
+    The AREA spec says files are big-endian, but plenty of real ones were
+    written little-endian, so both are tried and scored on the sensor number,
+    the version word and the image size. Ties go to big-endian.
+    """
+    scores = {order: _directory_plausibility(np.frombuffer(dir_bytes[:DIRECTORY_BYTES], dtype=f'{order}i4'))
+              for order in ('>', '<')}
+    best = max(scores, key=lambda order: (scores[order], order == '>'))
+    if scores[best] < 10:
+        logger.warning('Could not confidently detect the AREA byte order (scores %s); assuming big-endian.', scores)
+        return '>'
+    return best
+
+
+def area_directory(dir_bytes, byte_order=None):
+    """Parse the 256-byte AREA directory.
+
+    Args:
+        dir_bytes: The first 256 bytes of the file.
+        byte_order: ``'>'`` or ``'<'``; detected from the content when omitted.
+
+    Returns:
+        A ctypes structure with the directory words as attributes and the
+        byte order it was read with in ``.byte_order``.
+    """
+    if len(dir_bytes) < DIRECTORY_BYTES:
+        raise ValueError(f'Truncated AREA directory: {len(dir_bytes)} bytes, expected {DIRECTORY_BYTES}')
+    dir_bytes = bytes(dir_bytes[:DIRECTORY_BYTES])
+    if byte_order is None:
+        byte_order = detect_byte_order(dir_bytes)
+    directory = _DIRECTORY_CLASSES[byte_order].from_buffer_copy(dir_bytes)
+    directory.byte_order = byte_order
+    directory._setup(dir_bytes)
+    return directory
