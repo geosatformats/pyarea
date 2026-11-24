@@ -7,6 +7,7 @@ from io import BytesIO
 import numpy as np
 
 from pyarea.calibration import (
+    DefaultCalibrator,
     GOESCalibrator,
     GVARCalibrator,
     cal_type_from_name,
@@ -49,6 +50,8 @@ class AreaFile(BytesIO):
 
         self.directory = area_directory(self.getbuffer()[:DIRECTORY_BYTES])
         self.adir_bytes = self.directory.dir_bytes
+        for problem in self.directory.check(self.sz):
+            logger.warning('%s: %s', self.source, problem)
 
         # as per http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#34971
         # after the directory bytes the blocks are, in order: nav, cal, aux, data, comments
@@ -440,11 +443,18 @@ class AreaFile(BytesIO):
         Returns:
             float32 array of shape ``(lines, elements)``; use ``calibrated_unit`` for its unit.
         """
+        out = cal_type_from_name(units)
+        if self.source_type != 'GVAR':
+            # no calibration here, but a file that already holds what is asked for (a McFETCH file in TEMP, say)
+            # gives its own pixels; see ``directory.calibration_scale_factor`` for any scaling of the stored values
+            if self.cal_type.upper() != units.strip().upper():
+                raise ValueError(f'{self.source}: the file holds {self.cal_type or "unknown"} data and '
+                                 f'only GVAR files can be calibrated to {units.strip().upper()}.')
+            return DefaultCalibrator().calibrate_array(self.read_data(), band, out)
         if band is None:
             if self.num_bands != 1:
                 raise ValueError(f'{self.source}: this file has {self.num_bands} bands; pass band=.')
             band = self.directory.bands[0]
-        out = cal_type_from_name(units)
         return self.gvar_calibrator.calibrate_array(self.read_data(), band, out)
 
     def read_vis(self, calibration='counts'):

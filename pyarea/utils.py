@@ -309,7 +309,7 @@ def caldat(julian):
 def compose_area_name(adir=None,coverage=None, ):
 
     band = adir.bands[0]
-    nom_dt = adir.nominalTime
+    nom_dt = adir.nominal_time
     date_str = nom_dt.date().strftime('%Y%m%d')
     time_str = nom_dt.time().strftime('%H%M')
     cov = '_%s' % coverage if coverage else ''

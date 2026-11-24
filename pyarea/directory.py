@@ -2,7 +2,6 @@ import ctypes as C
 import logging
 import os
 import struct
-import typing
 
 import numpy as np
 
@@ -91,34 +90,36 @@ class _DirectoryMixin:
         self.dir_bytes = dir_bytes
         self.nominal_time = yyyddd_hhmmss2datetime(self.yyyddd, self.hhmmss)
         self.creation_time = yyyddd_hhmmss2datetime(self.file_yyyddd, self.file_hhmmss)
-        if self.image_yyyddd != 0 and self.image_hhmmss_or_ms !=0:
+        # as in VisAD's AreaDirectory the actual start is used unless both of its words are zero
+        if self.image_yyyddd != 0 or self.image_hhmmss_or_ms != 0:
             self.start_time = yyyddd_hhmmss2datetime(self.image_yyyddd, self.image_hhmmss_or_ms)
         else:
             self.start_time = self.nominal_time
 
-
-
-        # print('{0:032b}'.format(self.spectral_band_map_1_32))
-        # for i in range(32):
-        #     print(i, self.spectral_band_map_1_32 & (1 << i) == self.spectral_band_map_1_32)
-
-
-        #next code actually does check if n'th bit is set where n is in range (0, 32)
-        #for the second word it adds  32 offset to reach bands 33-64
-        self.bands_1_32 = [i+1  for i in range(32) if self.spectral_band_map_1_32&(1<<i)>0]
-        if self.spectral_band_count >32:
-            self.bands_33_64 = [32+i+1  for i in range(32) if self.spectral_band_map_33_64&(1<<i)>0]
-        else:
-            self.bands_33_64 = []
-        self.bands = self.bands_1_32 + self.bands_33_64
+        # Word 19 maps bands 1-32 and word 20 bands 33-64 (bit 0 of word 19 is band 1). Word 20 is only
+        # documented as satellite specific for older sensors, so, like VisAD, stop at the declared band count:
+        # a map can have more bits set than bands (the AVHRR 3a/3b case).
+        self.bands_1_32 = [i + 1 for i in range(32) if (self.spectral_band_map_1_32 >> i) & 1]
+        self.bands_33_64 = [i + 33 for i in range(32) if (self.spectral_band_map_33_64 >> i) & 1]
+        self.bands = (self.bands_1_32 + self.bands_33_64)[:max(self.spectral_band_count, 0)]
 
         self.comment_cards = list() if self.comment_count > 0 else None
+        self._card_names = set()
 
+
+    @property
+    def words(self):
+        """The 64 directory words as native int32 values, whatever byte order the file was written in."""
+        return np.frombuffer(self.dir_bytes, dtype=f'{self.byte_order}i4').astype(np.int32)
 
     def __eq__(self, other):
-        return (self.nominalTime == other.nominalTime and self.imgbox == other.imgbox
-                and self.byte_depth == other.byte_depth)
+        """Equal when all 64 words are, like ``AreaDirectory.equals`` in VisAD (the byte order does not matter)."""
+        if not isinstance(other, _DirectoryMixin):
+            return NotImplemented
+        return bool(np.array_equal(self.words, other.words))
 
+    def __hash__(self):
+        return hash(self.words.tobytes())
 
     @property
     def buffer(self):
@@ -127,10 +128,54 @@ class _DirectoryMixin:
     def __repr__(self):
         return self.__str__()
 
+    @property
+    def source_type_name(self):
+        """The image source type (``VISR``, ``GVAR``...); for ``VISR`` the original source type when there is one."""
+        source = self.source_type.decode(errors='replace').strip('\x00 ')
+        original = self.original_source_type.decode(errors='replace').strip('\x00 ')
+        return original if source.upper() == 'VISR' and original else source
+
+    @property
+    def calibration_unit_name(self):
+        """The unit of the stored values (directory word 58, ASCII), or None where the file gives none."""
+        raw = self.dir_bytes[57 * 4:58 * 4]
+        if self.units in (0, _MCMISSING):
+            return None
+        return raw.decode('ascii', errors='replace').strip('\x00 ') or None
+
+    @property
+    def calibration_scale_factor(self):
+        """The scaling factor of the stored values (word 59); 1 where it is 0 or missing, as in VisAD."""
+        return 1 if self.scaling in (0, _MCMISSING) else self.scaling
+
+    def check(self, file_size=None):
+        """Sanity checks on the directory; returns a list of messages, empty when nothing looks wrong.
+
+        Args:
+            file_size: The size of the file in bytes, to check the block offsets against; skipped when omitted.
+                Truncated data (fewer lines than the directory claims) is reported by :class:`pyarea.file.AreaFile`,
+                which knows the line length.
+        """
+        problems = []
+        if self.sensor_info is None:
+            problems.append(f'Sensor source number {self.sensor_source_number} is not in the sensor table.')
+        if self.bytes_per_element not in (1, 2, 4):
+            problems.append(f'{self.bytes_per_element} bytes per element; only 1, 2 or 4 are defined.')
+        if self.lines <= 0 or self.elements <= 0:
+            problems.append(f'The image size is {self.lines} lines x {self.elements} elements.')
+        if self.data_block_offset <= 0:
+            problems.append('There is no data block offset.')
+        if file_size is not None:
+            for name in ('nav', 'cal', 'aux', 'data'):
+                offset = getattr(self, f'{name}_block_offset')
+                if offset >= file_size or offset < 0:
+                    problems.append(f'The {name} block offset {offset} is outside the file ({file_size} bytes).')
+        return problems
+
     def __str__(self):
 
         r = f'\n{"-"*35} \n' \
-            f'{self.sensor} {self.cal_type.decode().strip()} {self.source_type.decode().strip()} '\
+            f'{self.sensor} {self.cal_type.decode().strip()} {self.source_type_name} '\
             f'image scanned at {self.start_time}\n' \
             f'{"-"*35}\n' \
             f'Nominal time: {self.nominal_time}\n'\
@@ -139,7 +184,12 @@ class _DirectoryMixin:
             f'X resolution: {self.element_res}\n'\
             f'Size: {str(self.size)}\n' \
             f'Data width: {self.bytes_per_element}\n'\
-            f'Bounding box: {self.imgbox}\n'
+            f'Bounding box: {self.imgbox}\n'\
+            f'Sensor source number: {self.sensor_source_number}\n'\
+            f'Byte order: {"big" if self.byte_order == ">" else "little"}-endian\n'\
+            f'Line prefix length: {self.line_prefix_length}\n'\
+            f'Block offsets: nav {self.nav_block_offset}, cal {self.cal_block_offset}, '\
+            f'aux {self.aux_block_offset}, data {self.data_block_offset}\n'
 
         if self.comment_cards:
             r+= 'Comment cards:\n'
@@ -182,17 +232,16 @@ class _DirectoryMixin:
                 card_name = card_name.lower()
                 # print(f'{card_name} = {val}')
                 self.comment_cards.append(f'{card_name} = {val}')
-                if not hasattr(self, card_name):
-                    setattr(self, card_name, val)
-
-                else:
-                    old_val = getattr(self, card_name, 'None')
-                    if isinstance(old_val, typing.List):
+                if card_name not in self._card_names:
+                    if not hasattr(self, card_name):  # never replace a directory field or method
+                        setattr(self, card_name, val)
+                        self._card_names.add(card_name)
+                else:  # a card that comes more than once becomes a list of its values
+                    old_val = getattr(self, card_name)
+                    if isinstance(old_val, list):
                         old_val.append(val)
-
                     else:
-                        old_val = list(old_val)
-                    setattr(self, card_name, old_val)
+                        setattr(self, card_name, [old_val, val])
             except Exception as e:
                 logger.error(f'Failed to parse card number {ci} on {self.id_text}. Error is {str(e)}')
 
@@ -200,7 +249,7 @@ class _DirectoryMixin:
 
     @property
     def id_text(self):
-        return (f'{self.sensor} {self.cal_type.decode()} {self.source_type.decode()} '
+        return (f'{self.sensor} {self.cal_type.decode()} {self.source_type_name} '
                 f'image scanned at {self.start_time}\n')
 
     @property
@@ -301,6 +350,7 @@ class _AreaDirectoryLE(_DirectoryMixin, C.LittleEndianStructure):
     _fields_ = HEADER_FIELDS
 
 
+_MCMISSING = -2139062144  # 0x80808080, the McIDAS "missing" value
 _DIRECTORY_CLASSES = {'>': _AreaDirectoryBE, '<': _AreaDirectoryLE}
 DIRECTORY_BYTES = 256
 
