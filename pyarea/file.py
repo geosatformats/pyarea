@@ -149,13 +149,18 @@ class AreaFile(BytesIO):
         return np.frombuffer(raw, dtype=np.uint8).reshape(self.lines, self.line_len)
 
     def _pixel_array(self):
-        """The pixels as a native-endian ``(lines, elements, bands)`` array (BIP, as in the file)."""
-        if self.datawidth not in (1, 2):
+        """The pixels as a native-endian ``(lines, elements, bands)`` array (BIP, as in the file).
+
+        As in VisAD, 1- and 2-byte values are unsigned and 4-byte values (RAD from an ADDE server, times the
+        directory's scaling) are signed.
+        """
+        if self.datawidth not in (1, 2, 4):
             raise NotImplementedError(f'{self.source}: {self.datawidth} bytes per element is not supported.')
         pixel_bytes = self._line_array()[:, self.line_prefix_len:self.line_prefix_len + self.line_data_len]
         if self.datawidth == 1:
             return pixel_bytes.reshape(self.lines, self.elements, self.num_bands)
-        file_dtype = np.dtype(f'{self.directory.byte_order}u2')
+        kind = 'i' if self.datawidth == 4 else 'u'
+        file_dtype = np.dtype(f'{self.directory.byte_order}{kind}{self.datawidth}')
         pixels = pixel_bytes.copy().view(file_dtype).reshape(self.lines, self.elements, self.num_bands)
         return pixels.astype(file_dtype.newbyteorder('='), copy=False)
 
@@ -214,7 +219,7 @@ class AreaFile(BytesIO):
 
     @property
     def npdtype(self):
-        return f'{self.directory.byte_order}u{self.datawidth}'
+        return f'{self.directory.byte_order}{"i" if self.datawidth == 4 else "u"}{self.datawidth}'
 
 
     @property
@@ -452,11 +457,12 @@ class AreaFile(BytesIO):
             if self.cal_type.upper() != units.strip().upper():
                 raise ValueError(f'{self.source}: the file holds {self.cal_type or "unknown"} data and '
                                  f'only GVAR files can be calibrated to {units.strip().upper()}.')
-            pixels = DefaultCalibrator().calibrate_array(self.read_data(), band, out)
+            data = self.read_data()
             scale = self.directory.calibration_scale_factor
             if out in (Calibrator.CAL_TEMP, Calibrator.CAL_RAD, Calibrator.CAL_ALB) and scale != 1:
-                pixels = (pixels.astype(np.float64) / scale).astype(np.float32)
-            return pixels
+                # divide the integers, not their float32 copy: 4-byte values can have more than 24 bits
+                return (data.astype(np.float64) / scale).astype(np.float32)
+            return DefaultCalibrator().calibrate_array(data, band, out)
         if band is None:
             if self.num_bands != 1:
                 raise ValueError(f'{self.source}: this file has {self.num_bands} bands; pass band=.')

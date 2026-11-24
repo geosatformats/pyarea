@@ -143,8 +143,8 @@ class TestModeA:
             AreaFile(mode_a_vis_file).read_vis("bogus")
 
     def test_unsupported_element_size(self, tmp_path):
-        """Only one and two byte elements are supported."""
-        spec = FakeArea(GOES3_IR, mode_a_data([100]), bytes_per_elem=4, **IR_WINDOW)
+        """Only one, two and four byte elements are supported."""
+        spec = FakeArea(GOES3_IR, mode_a_data([100]), bytes_per_elem=8, **IR_WINDOW)
         area = AreaFile(write_area_file(tmp_path / "goes03.1979.234.1515.AREA_IR", spec))
         with pytest.raises(NotImplementedError, match="bytes per element"):
             area.read_data()

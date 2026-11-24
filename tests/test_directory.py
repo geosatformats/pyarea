@@ -207,3 +207,35 @@ def test_read_calibrated_divides_by_the_scaling_of_an_adde_file(tmp_path):
     assert temperature.dtype == np.float32
     assert set(np.unique(temperature)) == {np.float32(192.41), np.float32(250.0), np.float32(311.84)}
     np.testing.assert_array_equal(area.read_data(), data[:, :, 0])  # the stored pixels are untouched
+
+
+@pytest.mark.parametrize('endian', ['>', '<'])
+def test_four_byte_pixels_are_read_as_signed_integers(tmp_path, endian):
+    from pyarea.file import AreaFile
+    from tests.fake_area_files import GOES7_IR, IR_WINDOW, SHAPE, FakeArea, write_area_file
+
+    values = np.array([-5, 0, 70000, 123456789], dtype=np.int64)
+    columns = np.resize(values, SHAPE[1])
+    data = np.tile(columns[None, :, None], (SHAPE[0], 1, 1))
+    path = write_area_file(tmp_path / 'four_byte.area',
+                           FakeArea(GOES7_IR, data, cal_type='RAD', bytes_per_elem=4, endian=endian, **IR_WINDOW))
+    area = AreaFile(path)
+    assert area.directory.bytes_per_element == 4
+    pixels = area.read_data()
+    assert pixels.dtype == np.int32
+    np.testing.assert_array_equal(pixels, data[:, :, 0])
+    assert area.npdtype == f'{endian}i4'
+
+
+def test_read_calibrated_scales_four_byte_radiance(tmp_path):
+    from pyarea.file import AreaFile
+    from tests.fake_area_files import GOES7_IR, IR_WINDOW, SHAPE, FakeArea, patch_dir_word, write_area_file
+
+    columns = np.resize(np.array([123456789, 2500000], dtype=np.int64), SHAPE[1])
+    data = np.tile(columns[None, :, None], (SHAPE[0], 1, 1))
+    path = write_area_file(tmp_path / 'abi_rad.area',
+                           FakeArea(GOES7_IR, data, cal_type='RAD', bytes_per_elem=4, **IR_WINDOW))
+    patch_dir_word(path, 58, 1000)
+    radiance = AreaFile(path).read_calibrated('RAD')
+    assert radiance.dtype == np.float32
+    np.testing.assert_allclose(sorted(set(np.unique(radiance))), [2500.0, 123456.789], rtol=1e-7)
