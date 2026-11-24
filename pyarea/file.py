@@ -7,6 +7,7 @@ from io import BytesIO
 import numpy as np
 
 from pyarea.calibration import (
+    Calibrator,
     DefaultCalibrator,
     GOESCalibrator,
     GVARCalibrator,
@@ -446,11 +447,16 @@ class AreaFile(BytesIO):
         out = cal_type_from_name(units)
         if self.source_type != 'GVAR':
             # no calibration here, but a file that already holds what is asked for (a McFETCH file in TEMP, say)
-            # gives its own pixels; see ``directory.calibration_scale_factor`` for any scaling of the stored values
+            # gives its own pixels. ADDE stores TEMP, RAD and ALB as integers times the directory's scaling
+            # (word 59: a GOES-16 TEMP file has 19241 for 192.41 K and a scaling of 100), so those are divided by it.
             if self.cal_type.upper() != units.strip().upper():
                 raise ValueError(f'{self.source}: the file holds {self.cal_type or "unknown"} data and '
                                  f'only GVAR files can be calibrated to {units.strip().upper()}.')
-            return DefaultCalibrator().calibrate_array(self.read_data(), band, out)
+            pixels = DefaultCalibrator().calibrate_array(self.read_data(), band, out)
+            scale = self.directory.calibration_scale_factor
+            if out in (Calibrator.CAL_TEMP, Calibrator.CAL_RAD, Calibrator.CAL_ALB) and scale != 1:
+                pixels = (pixels.astype(np.float64) / scale).astype(np.float32)
+            return pixels
         if band is None:
             if self.num_bands != 1:
                 raise ValueError(f'{self.source}: this file has {self.num_bands} bands; pass band=.')

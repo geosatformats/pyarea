@@ -188,3 +188,22 @@ def test_read_calibrated_gives_the_stored_pixels_when_the_file_already_holds_tha
     assert set(np.unique(temperature)) == set(values)
     with pytest.raises(ValueError, match='only GVAR files can be calibrated'):
         area.read_calibrated('RAD')
+
+
+def test_read_calibrated_divides_by_the_scaling_of_an_adde_file(tmp_path):
+    """A GOES-16 McFETCH file in TEMP: units word 'K', scaling 100, 19241 for 192.41 K."""
+    from pyarea.file import AreaFile
+    from tests.fake_area_files import GOES7_IR, IR_WINDOW, SHAPE, FakeArea, patch_dir_word, write_area_file
+
+    columns = np.resize(np.array([19241, 25000, 31184], dtype=np.uint16), SHAPE[1])
+    data = np.tile(columns[None, :, None], (SHAPE[0], 1, 1))
+    path = write_area_file(tmp_path / 'abi_temp.area',
+                           FakeArea(GOES7_IR, data, cal_type='TEMP', bytes_per_elem=2, **IR_WINDOW))
+    patch_dir_word(path, 57, int.from_bytes(b'K   ', 'big'))
+    patch_dir_word(path, 58, 100)
+    area = AreaFile(path)
+    assert area.directory.calibration_unit_name == 'K'
+    temperature = area.read_calibrated('TEMP')
+    assert temperature.dtype == np.float32
+    assert set(np.unique(temperature)) == {np.float32(192.41), np.float32(250.0), np.float32(311.84)}
+    np.testing.assert_array_equal(area.read_data(), data[:, :, 0])  # the stored pixels are untouched
