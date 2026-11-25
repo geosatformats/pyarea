@@ -3,7 +3,7 @@ import struct
 
 import pytest
 
-from pyarea.nav import ABINNav, AreaNav, GEOSNav, GMSXNav, GOESNav, GVARNav, LALONav, RECTNav
+from pyarea.nav import ABINNav, AreaNav, GEOSNav, GMSXNav, GOESNav, GVARNav, LALONav, MSATNav, RECTNav
 
 
 def _block(code, order=">"):
@@ -20,7 +20,7 @@ def _pick(code, order=">"):
 @pytest.mark.parametrize(
     ("code", "klass"),
     [("GVAR", GVARNav), ("GOES", GOESNav), ("RECT", RECTNav), ("GMSX", GMSXNav), ("LALO", LALONav), ("ABIN", ABINNav),
-     ("GEOS", GEOSNav)])
+     ("GEOS", GEOSNav), ("MSAT", MSATNav)])
 def test_nav_type_selects_the_class(code, klass, order):
     nav = _pick(code, order)
     assert type(nav) is klass
@@ -47,8 +47,8 @@ def test_navblock_and_byte_order_are_required():
 
 
 def test_navigations_that_are_not_ported_say_so():
-    with pytest.raises(NotImplementedError, match="MSAT"):
-        AreaNav(navblock=_block("MSAT"), byte_order=">", int_format="i")
+    with pytest.raises(NotImplementedError, match="MSGT"):
+        AreaNav(navblock=_block("MSGT"), byte_order=">", int_format="i")
 
 
 def test_gmsx_block_is_accepted_on_python_3():
