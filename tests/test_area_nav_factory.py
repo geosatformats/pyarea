@@ -47,8 +47,8 @@ def test_navblock_and_byte_order_are_required():
 
 
 def test_navigations_that_are_not_ported_say_so():
-    with pytest.raises(NotImplementedError, match="LALO"):
-        AreaNav(navblock=_block("LALO"), byte_order=">", int_format="i")
+    with pytest.raises(NotImplementedError, match="MSAT"):
+        AreaNav(navblock=_block("MSAT"), byte_order=">", int_format="i")
 
 
 def test_gmsx_block_is_accepted_on_python_3():

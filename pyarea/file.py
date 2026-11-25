@@ -240,7 +240,8 @@ class AreaFile(BytesIO):
         Raises ``NotImplementedError`` for a nav block of a type pyarea has no navigation for.
         """
         if self.areaNav is None and self.nav is not None:
-            nav = AreaNav(navblock=self.nav, byte_order=self.directory.byte_order, int_format=self.INTEGER_FORMAT)
+            nav = AreaNav(navblock=self.nav, auxblock=self.aux, byte_order=self.directory.byte_order,
+                          int_format=self.INTEGER_FORMAT)
             nav.setImageStart(self.directory.line_ul, self.directory.element_ul)
             nav.setRes(*self.resolution)
             nav.setMag(1, 1)

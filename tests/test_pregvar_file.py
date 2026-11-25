@@ -323,9 +323,9 @@ class TestNavigation:
         assert (sub_lon[0, 0], sub_lat[0, 0]) == (expected_lon, expected_lat)
 
     def test_nav_type_without_array_navigation(self, tmp_path):
-        """LALO has no vectorized conversion yet: say so instead of failing inside the navigation."""
+        """A nav type pyarea has no navigation for is reported, not mistaken for GOES."""
         words = np.zeros(640, dtype=">i4")
-        words[0] = int.from_bytes(b"LALO", "big")
+        words[0] = int.from_bytes(b"MSAT", "big")
         spec = FakeArea(GOES7_IR, mode_a_data([100]), nav_words=words, **IR_WINDOW)
         area = AreaFile(write_area_file(tmp_path / "lalo.area", spec))
         with pytest.raises(NotImplementedError):

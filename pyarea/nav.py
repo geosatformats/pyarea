@@ -977,9 +977,227 @@ class GVARNav(AreaNav):
         return self.sublat * self.DEG, self.sublon * self.DEG
 
 
+def _float_bits(words):
+    """Reinterpret 32-bit integer words (already decoded from the file's byte order) as floats, like intBitsToFloat."""
+    return np.asarray(words, dtype=np.int64).astype(np.uint32).view(np.float32)
+
+
 class LALONav(AreaNav):
+    """Navigation from tables of latitude and longitude, nav type LALO (Kalpana-1 and others).
+
+    Port of ``edu.wisc.ssec.mcidas.LALOnav`` (``laloutil.c`` of McIDAS-X). The nav block describes a grid of
+    ``rows`` x ``cols`` tie points, one every ``latres`` image lines and ``lonres`` image elements from the image
+    position ``ulline``/``ulelem``, and the aux block holds the float32 latitude and longitude of each of them. Words of
+    the nav block (counted from 1): 66 and 67 the number of rows and columns, 68-71 the minimum and maximum latitude
+    and longitude (floats), 72 and 73 the line and element spacing, 74 and 75 the table position inside the image
+    (unused), 76 and 77 the image line and element of the first tie point, 78 the size of the aux block, 79 and 80
+    the byte offsets of the latitude and longitude tables within the aux block.
+
+    ``to_latlon`` interpolates between the four surrounding tie points like the Java, which truncates the line and
+    element to a whole number of image pixels first. Tie points with a latitude or longitude outside -90 to 90 and
+    -180 to 360 are missing (stored as 0, 0), and so is any pixel next to one. ``to_lin_ele`` has no counterpart in
+    exact arithmetic in VisAD (it asks ``Gridded2DSet.valueToGrid``); here the interpolation of ``to_latlon`` is
+    inverted with Newton's method, which agrees at the tie points and between them where the grid is smooth.
+    """
+
+    labels = {1: 'LALO', 66: 'rows', 67: 'columns', 68: 'minimum latitude', 69: 'minimum longitude',
+              70: 'maximum latitude', 71: 'maximum longitude', 72: 'line spacing', 73: 'element spacing',
+              76: 'image line of the first tie point', 77: 'image element of the first tie point',
+              78: 'size of the aux block', 79: 'byte offset of the latitudes', 80: 'byte offset of the longitudes'}
+
     def __init__(self, navblock=None, auxblock=None, **kwargs):
-        raise NotImplementedError('LALO (latitude/longitude grid) navigation is not implemented')
+        if self.navtype.strip() != self.LALO:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 80:
+            raise ValueError(f'The LALO navigation block has {len(navblock)} words, 80 are needed.')
+        if auxblock is None or len(auxblock) == 0:
+            raise ValueError('LALO navigation needs the aux block of the file, which holds the latitudes '
+                             'and longitudes.')
+        self.rows, self.cols = int(navblock[65]), int(navblock[66])
+        bounds = _float_bits(navblock[67:71])
+        self.minlat, self.minlon, self.maxlat, self.maxlon = (float(v) for v in bounds)
+        self.latres, self.lonres = int(navblock[71]), int(navblock[72])
+        self.latpoint, self.lonpoint = int(navblock[73]), int(navblock[74])
+        self.ulline, self.ulelem = int(navblock[75]), int(navblock[76])
+        self.aux_size, self.lat_aux_offset, self.lon_aux_offset = (int(v) for v in navblock[77:80])
+        if self.rows < 1 or self.cols < 1:
+            raise ValueError(f'The LALO navigation block has {self.rows} rows and {self.cols} columns.')
+        if self.latres < 1 or self.lonres < 1:
+            raise ValueError(f'The LALO tie point spacing is {self.latres} lines by {self.lonres} elements.')
+        self.lrlin = self.ulline + (self.rows - 1) * self.latres
+        self.lrele = self.ulelem + (self.cols - 1) * self.lonres
+
+        self.numPoints = self.rows * self.cols
+        begin_lat, begin_lon = self.lat_aux_offset // 4, self.lon_aux_offset // 4
+        if min(begin_lat, begin_lon) < 0 or max(begin_lat, begin_lon) + self.numPoints > len(auxblock):
+            raise ValueError(f'The LALO tables ({self.numPoints} values at words {begin_lat} and {begin_lon}) '
+                             f'do not fit in the aux block of {len(auxblock)} words.')
+        aux = _float_bits(auxblock)
+        self.latData = aux[begin_lat:begin_lat + self.numPoints].copy()
+        self.lonData = aux[begin_lon:begin_lon + self.numPoints].copy()
+        with np.errstate(invalid='ignore'):
+            bad = (self.latData < -90.0) | (self.latData > 90.0) | (self.lonData < -180.0) | (self.lonData > 360.0)
+        self.latData[bad] = 0.0  # LAT_MISSING and LON_MISSING of the Java
+        self.lonData[bad] = 0.0
+        self._guess = None
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        NaN outside the table, where a neighbouring tie point is missing, and where the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        rlin, rele = image_line.ravel(), image_elem.ravel()
+        lat = np.full(rlin.shape, np.nan)
+        lon = np.full(rlin.shape, np.nan)
+        with np.errstate(invalid='ignore'):
+            inside = ((rlin >= self.ulline) & (rlin <= self.lrlin) & (rele >= self.ulelem) & (rele <= self.lrele))
+        if inside.any():
+            # the Java truncates to whole image pixels (int) before it takes the cell and the fractions
+            dline = np.trunc(rlin[inside]).astype(np.int64) - self.ulline
+            delem = np.trunc(rele[inside]).astype(np.int64) - self.ulelem
+            row, col = dline // self.latres, delem // self.lonres
+            tl = row * self.cols + col
+            tr, bl = tl + 1, tl + self.cols
+            br = bl + 1
+            last_row = row >= self.rows - 1
+            bl = np.where(last_row, tl, bl)
+            br = np.where(last_row, bl + 1, br)
+            last_col = col >= self.cols - 1
+            tr = np.where(last_col, tl, tr)
+            br = np.where(last_col, bl, br)
+
+            frac_row = (dline % self.latres).astype(np.float32) / np.float32(self.latres)
+            frac_col = (delem % self.lonres).astype(np.float32) / np.float32(self.lonres)
+            missing = np.zeros(tl.shape, dtype=bool)
+            values = []
+            for table in (self.latData, self.lonData):
+                values.append([table[i] for i in (tl, tr, bl, br)])
+            for corner in range(4):
+                missing |= (values[0][corner] == 0.0) & (values[1][corner] == 0.0)
+            out = []
+            for tl_v, tr_v, bl_v, br_v in values:
+                ax, bx, cx = tr_v - tl_v, bl_v - tl_v, (tl_v + br_v) - (bl_v + tr_v)
+                out.append(ax * frac_col + bx * frac_row + cx * frac_row * frac_col + tl_v)
+            lat[inside] = np.where(missing, np.nan, out[0])
+            lon[inside] = np.where(missing, np.nan, out[1])
+        return lat.reshape(line.shape), lon.reshape(line.shape)
+
+    def _first_guess(self):
+        """Coefficients of a quadratic fit of the tie point row and column to latitude and longitude."""
+        if self._guess is None:
+            rows, cols = np.divmod(np.arange(self.numPoints), self.cols)
+            lat, lon = self.latData.astype(float), self.lonData.astype(float)
+            keep = ~((lat == 0.0) & (lon == 0.0))
+            if keep.sum() > 400:  # a sample is as good for a starting point
+                keep &= (np.arange(self.numPoints) % max(1, int(keep.sum()) // 400) == 0)
+            lat0, lon0 = lat[keep].mean(), lon[keep].mean()
+            span = max(np.ptp(lat[keep]), np.ptp(lon[keep]), 1e-9)
+            u, v = (lat[keep] - lat0) / span, (lon[keep] - lon0) / span
+            design = np.column_stack([np.ones_like(u), u, v, u * u, u * v, v * v])
+            targets = np.column_stack([rows[keep], cols[keep]]).astype(float)
+            coefficients = np.linalg.lstsq(design, targets, rcond=None)[0]
+            self._guess = (lat0, lon0, span, coefficients)
+        return self._guess
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates, NaN where the point is outside the table or the grid is not smooth
+        enough for the search to find it. A longitude is moved by a multiple of 360 to the one nearest the table.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        qlat, qlon = lat.ravel().copy(), lon.ravel().copy()
+        grid_lat = self.latData.astype(float).reshape(self.rows, self.cols)
+        grid_lon = self.lonData.astype(float).reshape(self.rows, self.cols)
+        grid_lat[(grid_lat == 0.0) & (grid_lon == 0.0)] = np.nan
+        grid_lon = np.where(np.isnan(grid_lat), np.nan, grid_lon)
+        line = np.full(qlat.shape, np.nan)
+        elem = np.full(qlat.shape, np.nan)
+        usable = np.isfinite(qlat) & np.isfinite(qlon)
+        if usable.any() and np.isfinite(grid_lat).any():
+            mid = np.nanmean(grid_lon)
+            qlon = qlon + 360.0 * np.round((mid - qlon) / 360.0)
+            lat0, lon0, span, coefficients = self._first_guess()
+            u, v = (qlat[usable] - lat0) / span, (qlon[usable] - lon0) / span
+            features = np.column_stack([np.ones_like(u), u, v, u * u, u * v, v * v])
+            guess = features @ coefficients
+            row = np.clip(guess[:, 0], 0, self.rows - 1)
+            col = np.clip(guess[:, 1], 0, self.cols - 1)
+            target_lat, target_lon = qlat[usable], qlon[usable]
+            ok = self._newton(grid_lat, grid_lon, target_lat, target_lon, row, col)
+            row, col, converged = ok
+            image_line = np.where(converged, self.ulline + self.latres * row, np.nan)
+            image_elem = np.where(converged, self.ulelem + self.lonres * col, np.nan)
+            line[usable], elem[usable] = image_line, image_elem
+        line, elem = self._image_to_area(line, elem)
+        return line.reshape(lat.shape), elem.reshape(lat.shape)
+
+    def _newton(self, grid_lat, grid_lon, target_lat, target_lon, row, col):
+        """Invert the bilinear interpolation of the tie points: fractional ``row`` and ``col`` of each target."""
+        rows, cols = self.rows, self.cols
+        converged = np.zeros(row.shape, dtype=bool)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            for _ in range(40):
+                i = np.clip(np.floor(row), 0, max(rows - 2, 0)).astype(int)
+                j = np.clip(np.floor(col), 0, max(cols - 2, 0)).astype(int)
+                i1, j1 = np.minimum(i + 1, rows - 1), np.minimum(j + 1, cols - 1)
+                s, t = row - i, col - j
+                coefficients = []
+                for grid in (grid_lat, grid_lon):
+                    tl, tr, bl, br = grid[i, j], grid[i, j1], grid[i1, j], grid[i1, j1]
+                    coefficients.append((tl, tr - tl, bl - tl, (tl + br) - (bl + tr)))
+                (la0, la_t, la_s, la_st), (lo0, lo_t, lo_s, lo_st) = coefficients
+                res_lat = la0 + la_t * t + la_s * s + la_st * s * t - target_lat
+                res_lon = lo0 + lo_t * t + lo_s * s + lo_st * s * t - target_lon
+                converged = (np.abs(res_lat) < 1e-9) & (np.abs(res_lon) < 1e-9)
+                # Jacobian of (lat, lon) in (s, t), then the Newton step
+                a, b = la_s + la_st * t, la_t + la_st * s
+                c, d = lo_s + lo_st * t, lo_t + lo_st * s
+                det = a * d - b * c
+                ds = (d * res_lat - b * res_lon) / det
+                dt = (-c * res_lat + a * res_lon) / det
+                step_row = np.where(converged, 0.0, ds)
+                step_col = np.where(converged, 0.0, dt)
+                row = np.clip(row - np.nan_to_num(step_row, nan=0.0, posinf=0.0, neginf=0.0), 0, rows - 1)
+                col = np.clip(col - np.nan_to_num(step_col, nan=0.0, posinf=0.0, neginf=0.0), 0, cols - 1)
+                if converged.all():
+                    break
+            # one last look: after the last step the residual has to be small, and the point inside its cell
+            i = np.clip(np.floor(row), 0, max(rows - 2, 0)).astype(int)
+            j = np.clip(np.floor(col), 0, max(cols - 2, 0)).astype(int)
+            i1, j1 = np.minimum(i + 1, rows - 1), np.minimum(j + 1, cols - 1)
+            s, t = row - i, col - j
+            fit = []
+            for grid, target in ((grid_lat, target_lat), (grid_lon, target_lon)):
+                tl, tr, bl, br = grid[i, j], grid[i, j1], grid[i1, j], grid[i1, j1]
+                fit.append(np.abs(tl + (tr - tl) * t + (bl - tl) * s + ((tl + br) - (bl + tr)) * s * t - target))
+            # the tables are float32, so a residual of 1e-4 degree (about 10 m) is as good as it gets at the edges
+            converged = (fit[0] < 1e-4) & (fit[1] < 1e-4)
+        return row, col, converged
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not found."""
+        return self.to_lin_ele(lats, lons)
 
 
 # the nav block of a "GOES" file starts with the 4 ASCII bytes of the nav type code AreaNav already defines
