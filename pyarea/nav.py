@@ -2097,7 +2097,120 @@ class GMSXNav(AreaNav):
 
 
 
+# The constants of ABINnav.java (nvxabin.dlm of McIDAS-X): the GRS 80 ellipsoid of the GOES-R fixed grid.
+_ABIN_DH = 42164.16  # radius of the satellite orbit, km
+_ABIN_REQ = 6378.137  # radius of the Earth at the equator, km
+_ABIN_RPO = 6356.7523  # radius of the Earth at the poles, km
+_ABIN_FP = 1.006803  # (equatorial / polar radius) squared, as McIDAS has it
+_ABIN_D = _ABIN_DH * _ABIN_DH - _ABIN_REQ * _ABIN_REQ
+
+
 class ABINNav(AreaNav):
+    """Navigation for GOES-R ABI fixed grid AREA files, nav type ABIN.
+
+    Port of ``edu.wisc.ssec.mcidas.ABINnav`` (``nvxabin.dlm`` of McIDAS-X). The image line and element give the
+    ABI scan angles linearly, and the angles give the Earth location on the ellipsoid, as in the GOES-R Product
+    User's Guide. Words of the nav block: 2 and 3 the line and element offsets of the scan angles and 4 and 5 their
+    scale factors (radians x 1e8), 6 the subpoint longitude (degrees east x 10), 7 the base resolution.
+    """
+
+    labels = {1: 'ABIN',
+              2: 'line offset of the scan angle, radians x 1e8',
+              3: 'element offset of the scan angle, radians x 1e8',
+              4: 'line scale factor, radians per line x 1e8',
+              5: 'element scale factor, radians per element x 1e8',
+              6: 'subpoint longitude, degrees east x 10',
+              7: 'base resolution'}
 
     def __init__(self, navblock=None, auxblock=None, **kwargs):
-        raise NotImplementedError('ABIN (GOES-R ABI fixed grid) navigation is not implemented')
+        if self.navtype.strip() != self.ABIN:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 7:
+            raise ValueError(f'The ABIN navigation block has {len(navblock)} words, 7 are needed.')
+        self.loff = navblock[1] / 100000000.0
+        self.coff = navblock[2] / 100000000.0
+        self.lfac = navblock[3] / 100000000.0
+        self.cfac = navblock[4] / 100000000.0
+        self.plon = navblock[5] / 10.0
+        self.bres = float(navblock[6])
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive, in -180 to 180. NaN where the line of sight misses the Earth, or the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        dh, fp = _ABIN_DH, _ABIN_FP
+        with np.errstate(invalid='ignore', divide='ignore'):
+            # image coordinates are in base resolution units; the scan angles are linear in the pixels
+            xlin = (image_line - (self.bres - 1) / 2.0) / self.bres
+            xele = (image_elem - (self.bres - 1) / 2.0) / self.bres
+            theta_goes = xlin * self.lfac + self.loff
+            lamda_goes = xele * self.cfac + self.coff
+            # GOES to GEOS scan angles
+            theta_geos = np.arcsin(np.sin(theta_goes) * np.cos(lamda_goes))
+            lamda_geos = np.arctan(np.tan(lamda_goes) / np.cos(theta_goes))
+            cosx, cosy = np.cos(lamda_geos), np.cos(theta_geos)
+            sinx, siny = np.sin(lamda_geos), np.sin(theta_geos)
+
+            a = dh * cosx * cosy
+            k = cosy * cosy + fp * siny * siny
+            sdd = a * a - k * _ABIN_D
+            misses = sdd < 0.0
+            sn = (a - np.sqrt(np.where(misses, 0.0, sdd))) / k
+            s1 = dh - sn * cosx * cosy
+            s2 = sn * sinx * cosy
+            s3 = -(sn * siny)
+            sxy = np.sqrt(s1 * s1 + s2 * s2)
+            lon = np.degrees(np.arctan(s2 / s1) + math.radians(self.plon))
+            lat = np.degrees(np.arctan(-(fp * s3 / sxy)))
+            lon = np.where(lon > 180, lon - 360.0, np.where(lon < -180, lon + 360.0, lon))
+        return np.where(misses, np.nan, lat), np.where(misses, np.nan, lon)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is on the far side of the Earth. As in
+        VisAD, a point just beyond the limb still gets the scan angles it would have.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        dh, req2, rpo2 = _ABIN_DH, _ABIN_REQ ** 2, _ABIN_RPO ** 2
+        with np.errstate(invalid='ignore', divide='ignore'):
+            geographic_lat = np.radians(lat)
+            dlon = np.radians(lon) - math.radians(self.plon)
+            geocentric_lat = np.arctan(rpo2 / req2 * np.tan(geographic_lat))
+            cos_gc = np.cos(geocentric_lat)
+            r_earth = _ABIN_RPO / np.sqrt(1.0 - (req2 - rpo2) / req2 * cos_gc * cos_gc)
+            r_1 = dh - r_earth * cos_gc * np.cos(dlon)
+            r_2 = -(r_earth * cos_gc * np.sin(dlon))
+            r_3 = r_earth * np.sin(geocentric_lat)
+            lamda = np.arcsin(-(r_2 / np.sqrt(r_1 * r_1 + r_2 * r_2 + r_3 * r_3)))
+            theta = np.arctan(r_3 / r_1)
+            xlin = (theta - self.loff) / self.lfac * self.bres + (self.bres - 1) / 2.0
+            xele = (lamda - self.coff) / self.cfac * self.bres + (self.bres - 1) / 2.0
+            far_side = r_1 > dh
+        line, elem = self._image_to_area(np.where(far_side, np.nan, xlin), np.where(far_side, np.nan, xele))
+        return line, elem
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)
