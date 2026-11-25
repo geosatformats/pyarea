@@ -982,6 +982,108 @@ def _float_bits(words):
     return np.asarray(words, dtype=np.int64).astype(np.uint32).view(np.float32)
 
 
+@_njit
+def _value_to_grid(sx, sy, vx, vy, length_x, length_y, pos):
+    """``Gridded2DSet.valueToGrid`` (VisAD) in float32: the grid coordinates of the points (vx, vy).
+
+    ``sx`` and ``sy`` are the x and y of the ``length_x`` x ``length_y`` grid points, x running fastest; ``pos`` is the
+    orientation of the grid. The grid box of the previous point is the first guess, and so is the choice of triangle.
+    """
+    n = vx.shape[0]
+    grid_x = np.full(n, np.nan, dtype=np.float32)
+    grid_y = np.full(n, np.nan, dtype=np.float32)
+    gx = (length_x - 1) // 2
+    gy = (length_y - 1) // 2
+    lowertri = True
+    one = np.float32(1.0)
+    for i in range(n):
+        if i != 0 and grid_x[i - 1] != grid_x[i - 1]:  # the last point had no solution: start in the middle again
+            gx = (length_x - 1) // 2
+            gy = (length_y - 1) // 2
+        for _ in range(2 * (length_x + length_y)):
+            k0 = gy * length_x + gx
+            k1 = k0 + 1
+            k2 = (gy + 1) * length_x + gx
+            k3 = k2 + 1
+            v0x, v0y, v1x, v1y = sx[k0], sy[k0], sx[k1], sy[k1]
+            v2x, v2y, v3x, v3y = sx[k2], sy[k2], sx[k3], sy[k3]
+            px, py = vx[i], vy[i]
+            # the diagonal D-B and the distances P-B and P-D are used in both triangles
+            bdx, bdy = v2x - v1x, v2y - v1y
+            bpx, bpy = px - v1x, py - v1y
+            dpx, dpy = px - v2x, py - v2y
+            ogx, ogy = gx, gy
+            if lowertri:
+                abx, aby = v1x - v0x, v1y - v0y
+                dax, day = v0x - v2x, v0y - v2y
+                apx, apy = px - v0x, py - v0y
+                tval1 = abx * apy - aby * apx
+                tval2 = bdx * bpy - bdy * bpx
+                tval3 = dax * dpy - day * dpx
+                test1 = (tval1 == 0) or ((tval1 > 0) == pos)
+                test2 = (tval2 == 0) or ((tval2 > 0) == pos)
+                test3 = (tval3 == 0) or ((tval3 > 0) == pos)
+                if not test1 and not test2:  # up and right
+                    gx += 1
+                    gy -= 1
+                elif not test2 and not test3:  # down and left
+                    gx -= 1
+                    gy += 1
+                elif not test1 and not test3:  # up and left
+                    gx -= 1
+                    gy -= 1
+                elif not test1:  # up
+                    gy -= 1
+                elif not test3:  # left
+                    gx -= 1
+                gx = min(max(gx, 0), length_x - 2)
+                gy = min(max(gy, 0), length_y - 2)
+                if gx == ogx and gy == ogy and test2:  # the right triangle: solve with the reverse interpolation
+                    grid_x[i] = (((px - v0x) * (v2y - v0y) + (v0y - py) * (v2x - v0x))
+                                 / ((v1x - v0x) * (v2y - v0y) + (v0y - v1y) * (v2x - v0x)) + np.float32(gx))
+                    grid_y[i] = (((px - v0x) * (v1y - v0y) + (v0y - py) * (v1x - v0x))
+                                 / ((v2x - v0x) * (v1y - v0y) + (v0y - v2y) * (v1x - v0x)) + np.float32(gy))
+                    break
+                lowertri = False
+            else:
+                bcx, bcy = v3x - v1x, v3y - v1y
+                cdx, cdy = v2x - v3x, v2y - v3y
+                cpx, cpy = px - v3x, py - v3y
+                tval1 = bcx * bpy - bcy * bpx
+                tval2 = cdx * cpy - cdy * cpx
+                tval3 = bdx * dpy - bdy * dpx
+                test1 = (tval1 == 0) or ((tval1 > 0) == pos)
+                test2 = (tval2 == 0) or ((tval2 > 0) == pos)
+                test3 = (tval3 == 0) or ((tval3 < 0) == pos)
+                if not test1 and not test3:  # up and right
+                    gx += 1
+                    gy -= 1
+                elif not test2 and not test3:  # down and left
+                    gx -= 1
+                    gy += 1
+                elif not test1 and not test2:  # down and right
+                    gx += 1
+                    gy += 1
+                elif not test1:  # right
+                    gx += 1
+                elif not test2:  # down
+                    gy += 1
+                gx = min(max(gx, 0), length_x - 2)
+                gy = min(max(gy, 0), length_y - 2)
+                if gx == ogx and gy == ogy and test3:
+                    grid_x[i] = (((v3x - px) * (v1y - v3y) + (py - v3y) * (v1x - v3x))
+                                 / ((v2x - v3x) * (v1y - v3y) - (v2y - v3y) * (v1x - v3x)) + np.float32(gx)) + one
+                    grid_y[i] = (((v2y - v3y) * (v3x - px) + (v2x - v3x) * (py - v3y))
+                                 / ((v1x - v3x) * (v2y - v3y) - (v2x - v3x) * (v1y - v3y)) + np.float32(gy)) + one
+                    break
+                lowertri = True
+        if (grid_x[i] >= length_x - 0.5 or grid_y[i] >= length_y - 0.5
+                or grid_x[i] <= -0.5 or grid_y[i] <= -0.5):
+            grid_x[i] = np.nan
+            grid_y[i] = np.nan
+    return grid_x, grid_y
+
+
 class LALONav(AreaNav):
     """Navigation from tables of latitude and longitude, nav type LALO (Kalpana-1 and others).
 
@@ -995,9 +1097,9 @@ class LALONav(AreaNav):
 
     ``to_latlon`` interpolates between the four surrounding tie points like the Java, which truncates the line and
     element to a whole number of image pixels first. Tie points with a latitude or longitude outside -90 to 90 and
-    -180 to 360 are missing (stored as 0, 0), and so is any pixel next to one. ``to_lin_ele`` has no counterpart in
-    exact arithmetic in VisAD (it asks ``Gridded2DSet.valueToGrid``); here the interpolation of ``to_latlon`` is
-    inverted with Newton's method, which agrees at the tie points and between them where the grid is smooth.
+    -180 to 360 are missing (stored as 0, 0), and so is any pixel next to one. ``to_lin_ele`` is
+    ``Gridded2DSet.valueToGrid`` of VisAD, which interpolates linearly on the two triangles of each grid box (not
+    bilinearly as ``to_latlon`` does), so the two directions differ slightly between the tie points.
     """
 
     labels = {1: 'LALO', 66: 'rows', 67: 'columns', 68: 'minimum latitude', 69: 'minimum longitude',
@@ -1039,7 +1141,7 @@ class LALONav(AreaNav):
             bad = (self.latData < -90.0) | (self.latData > 90.0) | (self.lonData < -180.0) | (self.lonData > 360.0)
         self.latData[bad] = 0.0  # LAT_MISSING and LON_MISSING of the Java
         self.lonData[bad] = 0.0
-        self._guess = None
+        self._samples = None
 
     def to_latlon(self, line, elem):
         """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
@@ -1084,98 +1186,35 @@ class LALONav(AreaNav):
             lon[inside] = np.where(missing, np.nan, out[1])
         return lat.reshape(line.shape), lon.reshape(line.shape)
 
-    def _first_guess(self):
-        """Coefficients of a quadratic fit of the tie point row and column to latitude and longitude."""
-        if self._guess is None:
-            rows, cols = np.divmod(np.arange(self.numPoints), self.cols)
-            lat, lon = self.latData.astype(float), self.lonData.astype(float)
-            keep = ~((lat == 0.0) & (lon == 0.0))
-            if keep.sum() > 400:  # a sample is as good for a starting point
-                keep &= (np.arange(self.numPoints) % max(1, int(keep.sum()) // 400) == 0)
-            lat0, lon0 = lat[keep].mean(), lon[keep].mean()
-            span = max(np.ptp(lat[keep]), np.ptp(lon[keep]), 1e-9)
-            u, v = (lat[keep] - lat0) / span, (lon[keep] - lon0) / span
-            design = np.column_stack([np.ones_like(u), u, v, u * u, u * v, v * v])
-            targets = np.column_stack([rows[keep], cols[keep]]).astype(float)
-            coefficients = np.linalg.lstsq(design, targets, rcond=None)[0]
-            self._guess = (lat0, lon0, span, coefficients)
-        return self._guess
-
     def to_lin_ele(self, lat, lon):
         """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
 
-        The result is in AREA (file) coordinates, NaN where the point is outside the table or the grid is not smooth
-        enough for the search to find it. A longitude is moved by a multiple of 360 to the one nearest the table.
+        The result is in AREA (file) coordinates, NaN where VisAD finds no grid box for the point (outside the table,
+        or next to a missing tie point). Like the Java this is ``Gridded2DSet.valueToGrid`` in float32: a walk over
+        the grid triangles that starts in the middle of the table and carries on from the box of the previous point.
+        A longitude is compared with the table as it is (0 to 360 tables need 0 to 360 longitudes).
         """
         lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
-        qlat, qlon = lat.ravel().copy(), lon.ravel().copy()
-        grid_lat = self.latData.astype(float).reshape(self.rows, self.cols)
-        grid_lon = self.lonData.astype(float).reshape(self.rows, self.cols)
-        grid_lat[(grid_lat == 0.0) & (grid_lon == 0.0)] = np.nan
-        grid_lon = np.where(np.isnan(grid_lat), np.nan, grid_lon)
-        line = np.full(qlat.shape, np.nan)
-        elem = np.full(qlat.shape, np.nan)
-        usable = np.isfinite(qlat) & np.isfinite(qlon)
-        if usable.any() and np.isfinite(grid_lat).any():
-            mid = np.nanmean(grid_lon)
-            qlon = qlon + 360.0 * np.round((mid - qlon) / 360.0)
-            lat0, lon0, span, coefficients = self._first_guess()
-            u, v = (qlat[usable] - lat0) / span, (qlon[usable] - lon0) / span
-            features = np.column_stack([np.ones_like(u), u, v, u * u, u * v, v * v])
-            guess = features @ coefficients
-            row = np.clip(guess[:, 0], 0, self.rows - 1)
-            col = np.clip(guess[:, 1], 0, self.cols - 1)
-            target_lat, target_lon = qlat[usable], qlon[usable]
-            ok = self._newton(grid_lat, grid_lon, target_lat, target_lon, row, col)
-            row, col, converged = ok
-            image_line = np.where(converged, self.ulline + self.latres * row, np.nan)
-            image_elem = np.where(converged, self.ulelem + self.lonres * col, np.nan)
-            line[usable], elem[usable] = image_line, image_elem
+        if self.rows < 2 or self.cols < 2:  # VisAD refuses, and the Java returns null
+            grid_x = grid_y = np.full(lat.size, np.nan, dtype=np.float32)
+        else:
+            if self._samples is None:
+                with np.errstate(invalid='ignore'):
+                    missing = (self.latData == 0.0) & (self.lonData == 0.0)
+                self._samples = (np.where(missing, np.float32(np.nan), self.lonData).astype(np.float32),
+                                 np.where(missing, np.float32(np.nan), self.latData).astype(np.float32))
+            sample_x, sample_y = self._samples
+            with np.errstate(invalid='ignore'):
+                # the orientation of the grid, from its first box (Gridded2DSet.Pos)
+                xpos = ((sample_x[1] - sample_x[0]) * (sample_y[self.cols + 1] - sample_y[1])
+                        - (sample_y[1] - sample_y[0]) * (sample_x[self.cols + 1] - sample_x[1]))
+            grid_x, grid_y = _value_to_grid(sample_x, sample_y, np.ascontiguousarray(lon.ravel(), dtype=np.float32),
+                                            np.ascontiguousarray(lat.ravel(), dtype=np.float32), self.cols, self.rows,
+                                            bool(xpos > 0))
+        line = self.ulline + self.latres * grid_y.astype(float)
+        elem = self.ulelem + self.lonres * grid_x.astype(float)
         line, elem = self._image_to_area(line, elem)
         return line.reshape(lat.shape), elem.reshape(lat.shape)
-
-    def _newton(self, grid_lat, grid_lon, target_lat, target_lon, row, col):
-        """Invert the bilinear interpolation of the tie points: fractional ``row`` and ``col`` of each target."""
-        rows, cols = self.rows, self.cols
-        converged = np.zeros(row.shape, dtype=bool)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            for _ in range(40):
-                i = np.clip(np.floor(row), 0, max(rows - 2, 0)).astype(int)
-                j = np.clip(np.floor(col), 0, max(cols - 2, 0)).astype(int)
-                i1, j1 = np.minimum(i + 1, rows - 1), np.minimum(j + 1, cols - 1)
-                s, t = row - i, col - j
-                coefficients = []
-                for grid in (grid_lat, grid_lon):
-                    tl, tr, bl, br = grid[i, j], grid[i, j1], grid[i1, j], grid[i1, j1]
-                    coefficients.append((tl, tr - tl, bl - tl, (tl + br) - (bl + tr)))
-                (la0, la_t, la_s, la_st), (lo0, lo_t, lo_s, lo_st) = coefficients
-                res_lat = la0 + la_t * t + la_s * s + la_st * s * t - target_lat
-                res_lon = lo0 + lo_t * t + lo_s * s + lo_st * s * t - target_lon
-                converged = (np.abs(res_lat) < 1e-9) & (np.abs(res_lon) < 1e-9)
-                # Jacobian of (lat, lon) in (s, t), then the Newton step
-                a, b = la_s + la_st * t, la_t + la_st * s
-                c, d = lo_s + lo_st * t, lo_t + lo_st * s
-                det = a * d - b * c
-                ds = (d * res_lat - b * res_lon) / det
-                dt = (-c * res_lat + a * res_lon) / det
-                step_row = np.where(converged, 0.0, ds)
-                step_col = np.where(converged, 0.0, dt)
-                row = np.clip(row - np.nan_to_num(step_row, nan=0.0, posinf=0.0, neginf=0.0), 0, rows - 1)
-                col = np.clip(col - np.nan_to_num(step_col, nan=0.0, posinf=0.0, neginf=0.0), 0, cols - 1)
-                if converged.all():
-                    break
-            # one last look: after the last step the residual has to be small, and the point inside its cell
-            i = np.clip(np.floor(row), 0, max(rows - 2, 0)).astype(int)
-            j = np.clip(np.floor(col), 0, max(cols - 2, 0)).astype(int)
-            i1, j1 = np.minimum(i + 1, rows - 1), np.minimum(j + 1, cols - 1)
-            s, t = row - i, col - j
-            fit = []
-            for grid, target in ((grid_lat, target_lat), (grid_lon, target_lon)):
-                tl, tr, bl, br = grid[i, j], grid[i, j1], grid[i1, j], grid[i1, j1]
-                fit.append(np.abs(tl + (tr - tl) * t + (bl - tl) * s + ((tl + br) - (bl + tr)) * s * t - target))
-            # the tables are float32, so a residual of 1e-4 degree (about 10 m) is as good as it gets at the edges
-            converged = (fit[0] < 1e-4) & (fit[1] < 1e-4)
-        return row, col, converged
 
     def toLatLon(self, linele=None):
         """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""

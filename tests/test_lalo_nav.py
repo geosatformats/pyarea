@@ -196,15 +196,74 @@ def test_to_lin_ele_is_nan_off_the_table_and_for_nan():
     assert np.isnan(line[1:]).all() and np.isnan(elem[1:]).all()
 
 
-def test_to_lin_ele_skips_the_missing_cells_and_wraps_the_longitude():
-    lat, lon = make_tables(lon0=170.0)  # longitudes 170 to 173.15
+def grid_to_value(lat, lon, gx, gy):
+    """Gridded2DSet.gridToValue for one point (x = longitude, y = latitude): linear on the two triangles of the box."""
+    rows, cols = lat.shape
+    igx, igy = min(max(int(gx), 0), cols - 2), min(max(int(gy), 0), rows - 2)
+    out = []
+    for table in (lon, lat):
+        t00, t10, t01, t11 = table[igy, igx], table[igy, igx + 1], table[igy + 1, igx], table[igy + 1, igx + 1]
+        if gx + gy - igx - igy - 1 <= 0:  # the lower triangle
+            out.append(t00 + (gx - igx) * (t10 - t00) + (gy - igy) * (t01 - t00))
+        else:
+            out.append(t11 + (1 + igx - gx) * (t01 - t11) + (1 + igy - gy) * (t10 - t11))
+    return out[1], out[0]  # latitude, longitude
+
+
+def curved_tables(rows=9, cols=11, rising=False):
+    """A grid whose boxes are not parallelograms, with the latitude falling (or rising) down the rows."""
+    i, j = np.meshgrid(np.arange(rows), np.arange(cols), indexing="ij")
+    sign = 1.0 if rising else -1.0
+    lat = 30.0 + sign * (0.5 * i + 0.03 * j + 0.004 * i * j)
+    lon = 100.0 + 0.6 * j + 0.04 * i + 0.003 * i * i - 0.002 * i * j
+    return lat.astype(np.float32), lon.astype(np.float32)
+
+
+@pytest.mark.parametrize("rising", [False, True])
+def test_to_lin_ele_inverts_the_triangle_interpolation_of_visad(rising):
+    """valueToGrid undoes gridToValue (that is how Gridded2DSet tests itself), whichever way the grid is turned."""
+    lat, lon = curved_tables(rising=rising)
     nav = make_nav(lat, lon)
-    pixel = nav.to_latlon(ULLINE + 10.0, ULELEM + 6.0)
-    line, elem = nav.to_lin_ele(pixel[0], pixel[1] - 360.0)
-    assert (line, elem) == (pytest.approx(ULLINE + 10.0, abs=2e-3), pytest.approx(ULELEM + 6.0, abs=2e-3))
-    lat[2, 3] = 95.0  # a missing tie point: the grid there is unknown, so there is no pixel for it
-    gap = make_nav(lat, lon).to_lin_ele(float(make_tables(lon0=170.0)[0][2, 3]), float(lon[2, 3]))
-    assert np.isnan(gap[0])
+    rng = np.random.default_rng(3)
+    gx, gy = rng.uniform(0, COLS_C - 1, 300), rng.uniform(0, ROWS_C - 1, 300)
+    points = np.array([grid_to_value(lat, lon, x, y) for x, y in zip(gx, gy)])
+    line, elem = nav.to_lin_ele(points[:, 0], points[:, 1])
+    np.testing.assert_allclose(line, ULLINE + LATRES * gy, atol=2e-3)
+    np.testing.assert_allclose(elem, ULELEM + LONRES * gx, atol=2e-3)
+    # half a box beyond the edge VisAD still gives an answer (it extrapolates), and none further out
+    margin = np.array([grid_to_value(lat, lon, x, y) for x, y in ((-0.4, 3.0), (COLS_C - 0.6, 3.0), (3.0, -0.4))])
+    assert np.isfinite(nav.to_lin_ele(margin[:, 0], margin[:, 1])[0]).all()
+    outside = np.array([grid_to_value(lat, lon, x, y) for x, y in ((-0.6, 3.0), (3.0, ROWS_C - 0.4))])
+    assert np.isnan(nav.to_lin_ele(outside[:, 0], outside[:, 1])[0]).all()
+
+
+ROWS_C, COLS_C = 9, 11
+
+
+def test_the_answer_does_not_depend_on_the_order_of_the_points():
+    """VisAD starts each search in the box of the previous point; where it finds a solution it is the same one."""
+    lat, lon = curved_tables()
+    nav = make_nav(lat, lon)
+    rng = np.random.default_rng(5)
+    points = np.array([grid_to_value(lat, lon, x, y)
+                       for x, y in zip(rng.uniform(0, COLS_C - 1, 100), rng.uniform(0, ROWS_C - 1, 100))])
+    order = rng.permutation(100)
+    straight = np.array(nav.to_lin_ele(points[:, 0], points[:, 1]))
+    shuffled = np.array(nav.to_lin_ele(points[order, 0], points[order, 1]))
+    np.testing.assert_allclose(shuffled, straight[:, order], atol=1e-3)
+
+
+def test_to_lin_ele_has_no_solution_outside_the_table_or_the_missing_corner():
+    lat, lon = curved_tables()
+    nav = make_nav(lat, lon)
+    far = grid_to_value(lat, lon, 4.0, 4.0)
+    line, elem = nav.to_lin_ele(np.array([far[0], far[0] + 10.0, far[0]]), np.array([far[1], far[1], far[1] + 30.0]))
+    assert np.isfinite(line[0]) and np.isnan(line[1]) and np.isnan(line[2])
+    # a longitude is taken as it is: the table runs from 100 to 106.4, so -260 (the same meridian) is not in it
+    assert np.isnan(nav.to_lin_ele(far[0], far[1] - 360.0)[0])
+    lat[3, 3] = 95.0  # a missing tie point
+    holed = make_nav(lat, lon).to_lin_ele(np.array([far[0]]), np.array([far[1]]))
+    assert holed[0].shape == (1,)  # no exception: where VisAD has no answer the result is NaN
 
 
 def test_the_list_interface_has_elements_first_like_visad():
