@@ -494,7 +494,7 @@ class AreaFile(BytesIO):
         return nav
 
     def get_lonlats(self, lines=None, elems=None):
-        """Earth-locate pixels with the pre-GVAR GOES navigation.
+        """Earth-locate pixels with the file's navigation (GOES, GVAR, GMSX, ABIN or RECT).
 
         Args:
             lines: 0-based line indices in this file; all present lines by default.
@@ -502,12 +502,21 @@ class AreaFile(BytesIO):
 
         Returns:
             ``(lon, lat)`` in degrees, shape ``(len(lines), len(elems))``, NaN off the earth.
+
+        Raises:
+            ValueError: the file has no navigation block.
+            NotImplementedError: the navigation type has no vectorized ``to_latlon`` (e.g. LALO).
         """
-        nav = self._goes_nav()
+        nav = self.navigation
+        if nav is None:
+            raise ValueError(f'{self.source}: there is no navigation block.')
+        if not hasattr(nav, 'to_latlon'):
+            raise NotImplementedError(f'{self.source}: {type(nav).__name__} cannot Earth-locate arrays yet; '
+                                      'use its toLatLon.')
         lines = np.arange(self.lines) if lines is None else lines
         elems = np.arange(self.elements) if elems is None else elems
         line_grid, elem_grid = np.meshgrid(lines, elems, indexing='ij')
-        # file lines and elements are counted from 0 here, as in VisAD's GOESnav; the navigation adds the ul
+        # file lines and elements are counted from 0 here, as in VisAD's AREAnav; the navigation adds the ul
         # line/element and the resolution itself. (Earlier versions added 1, which moved every pixel by one.)
         lat, lon = nav.to_latlon(line_grid, elem_grid)
         return lon, lat

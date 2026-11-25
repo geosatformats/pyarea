@@ -138,7 +138,8 @@ def write_area_file(path, spec):
     data_offset = (cal_offset + CAL_WORDS * 4) if spec.cal_words is not None else nav_offset + NAV_WORDS * 4
 
     nav_words = make_nav_words() if spec.nav_words is None else spec.nav_words
-    nav = b"GOES" + _pack(nav_words[1:], spec.endian)
+    nav_type = int(nav_words[0]).to_bytes(4, "big") if nav_words[0] else b"GOES"  # the type as text, always
+    nav = nav_type + _pack(nav_words[1:], spec.endian)
 
     blocks = [_directory(spec, nav_offset, cal_offset, data_offset), nav]
     if spec.cal_words is not None:

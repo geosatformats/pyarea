@@ -306,6 +306,31 @@ class TestNavigation:
         sampling = AreaFile(mode_a_ir_file).get_nadir_sampling()
         assert sampling["sub_lon"] == pytest.approx(SUB_LON, abs=0.01)
 
+    def test_abin_file_is_located_through_the_file(self, tmp_path):
+        """get_lonlats uses the navigation of the file, here ABIN, and counts lines and elements from 0."""
+        data = np.full((20, 30, 1), 25000, dtype=">u2")
+        words = np.zeros(640, dtype=">i4")
+        words[0] = int.from_bytes(b"ABIN", "big")
+        words[1:7] = [15185800, -15185800, -5600, 5600, -750, 4]  # loff, coff, lfac, cfac, plon x 10, bres
+        spec = FakeArea(GOES7_IR, data, source_type="ABIN", cal_type="TEMP", bytes_per_elem=2, ul_line=10000,
+                        ul_element=10000, line_res=4, elem_res=4, nav_words=words)
+        area = AreaFile(write_area_file(tmp_path / "abin.area", spec))
+        lon, lat = area.get_lonlats()
+        assert lon.shape == lat.shape == (20, 30)
+        expected_lat, expected_lon = area.navigation.to_latlon(np.array(3.0), np.array(7.0))
+        assert (lon[3, 7], lat[3, 7]) == (expected_lon, expected_lat)
+        sub_lon, sub_lat = area.get_lonlats(lines=np.array([3]), elems=np.array([7]))
+        assert (sub_lon[0, 0], sub_lat[0, 0]) == (expected_lon, expected_lat)
+
+    def test_nav_type_without_array_navigation(self, tmp_path):
+        """LALO has no vectorized conversion yet: say so instead of failing inside the navigation."""
+        words = np.zeros(640, dtype=">i4")
+        words[0] = int.from_bytes(b"LALO", "big")
+        spec = FakeArea(GOES7_IR, mode_a_data([100]), nav_words=words, **IR_WINDOW)
+        area = AreaFile(write_area_file(tmp_path / "lalo.area", spec))
+        with pytest.raises(NotImplementedError):
+            area.get_lonlats()
+
     def test_no_orbital_elements(self, tmp_path):
         """Pre-1980 files can have a zeroed navigation block."""
         nav = make_nav_words()
@@ -320,7 +345,7 @@ class TestNavigation:
         area = AreaFile(mode_a_ir_file)
         assert area.nav is None
         assert area.navigation is None
-        with pytest.raises(ValueError, match="no GOES navigation"):
+        with pytest.raises(ValueError, match="no navigation block"):
             area.get_lonlats()
         with pytest.raises(ValueError, match="no GOES navigation"):
             area.get_nadir_sampling()
