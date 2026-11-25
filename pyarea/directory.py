@@ -302,6 +302,7 @@ class _DirectoryMixin:
             stext = text.split(' ')
             if 'GOES' in stext:
                 return ''.join(stext[:2])
+            return self.satellite or text  # e.g. "GMS infrared" -> GMS
         else:
             return text
 
