@@ -3,7 +3,7 @@ import struct
 
 import pytest
 
-from pyarea.nav import ABINNav, AreaNav, GMSXNav, GOESNav, GVARNav, LALONav, RECTNav
+from pyarea.nav import ABINNav, AreaNav, GEOSNav, GMSXNav, GOESNav, GVARNav, LALONav, RECTNav
 
 
 def _block(code, order=">"):
@@ -19,7 +19,8 @@ def _pick(code, order=">"):
 @pytest.mark.parametrize("order", [">", "<"])
 @pytest.mark.parametrize(
     ("code", "klass"),
-    [("GVAR", GVARNav), ("GOES", GOESNav), ("RECT", RECTNav), ("GMSX", GMSXNav), ("LALO", LALONav), ("ABIN", ABINNav)])
+    [("GVAR", GVARNav), ("GOES", GOESNav), ("RECT", RECTNav), ("GMSX", GMSXNav), ("LALO", LALONav), ("ABIN", ABINNav),
+     ("GEOS", GEOSNav)])
 def test_nav_type_selects_the_class(code, klass, order):
     nav = _pick(code, order)
     assert type(nav) is klass

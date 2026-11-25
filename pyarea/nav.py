@@ -2214,3 +2214,132 @@ class ABINNav(AreaNav):
     def toLinEle2(self, lats=None, lons=None):
         """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
         return self.to_lin_ele(lats, lons)
+
+
+# The constants of GEOSnav.java (nvxgeos.dlm of McIDAS-X): EUMETSAT's LRIT/HRIT Global Specification (CGMS 03).
+_GEOS_RADPOL = 6356.5838  # radius of the Earth at the poles, km
+_GEOS_RADEQ = 6378.1690  # radius of the Earth at the equator, km
+_GEOS_X42 = 42164.0  # radius of the satellite orbit, km
+_GEOS_FP = 1.006803  # (equatorial / polar radius) squared, as in the forward formulas
+_GEOS_FP_INVERSE = 0.993243  # (polar / equatorial radius) squared, as in the inverse formulas
+_GEOS_D = 1737121856.0  # X42 ** 2 - RADEQ ** 2, typed in as a constant in the Java
+
+
+class GEOSNav(AreaNav):
+    """Navigation for geostationary AREA files laid out as in the LRIT/HRIT specification, nav type GEOS.
+
+    Port of ``edu.wisc.ssec.mcidas.GEOSnav`` (``nvxgeos.dlm`` of McIDAS-X), used for Himawari, COMS-1 and the
+    MPEF/OSIS products. The image line and element are the HRIT column and line numbers (``COFF``, ``LOFF``,
+    ``CFAC``, ``LFAC``), with the scan angle in units of 2**-16 degrees. Words of the nav block: 2 and 3 the line and
+    element offsets (x 10), 4 and 5 the line and element scale factors (x 10), 6 the subpoint longitude (degrees east
+    x 10), 7 the base resolution (default 1) and 8 the pixel offset flag (1 for the half pixel convention of AHI).
+    """
+
+    labels = {1: 'GEOS',
+              2: 'line offset (LOFF) x 10',
+              3: 'element offset (COFF) x 10',
+              4: 'line scale factor (LFAC) x 10',
+              5: 'element scale factor (CFAC) x 10',
+              6: 'subpoint longitude, degrees east x 10',
+              7: 'base resolution',
+              8: 'pixel offset flag (1: half pixel adjustment as for AHI)'}
+
+    def __init__(self, navblock=None, auxblock=None, **kwargs):
+        if self.navtype.strip() != self.GEOS:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 6:
+            raise ValueError(f'The GEOS navigation block has {len(navblock)} words, 6 are needed.')
+        self.loff = int(navblock[1])
+        self.coff = int(navblock[2])
+        self.lfac = int(navblock[3])
+        self.cfac = int(navblock[4])
+        self.plon = int(navblock[5])
+        self.bres = int(navblock[6]) if len(navblock) > 6 and navblock[6] > 0 else 1
+        self.pixelOffsetFlag = int(navblock[7]) if len(navblock) > 7 and navblock[7] > 0 else 0
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive, in -180 to 180. NaN where the line of sight misses the Earth, or the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        bres = self.bres
+        shift = (bres - 1) / 2.0 if self.pixelOffsetFlag == 1 else bres - 1
+        with np.errstate(invalid='ignore', divide='ignore'):
+            xlin = (image_line + shift) / bres
+            xele = (image_elem + shift) / bres
+            # the scan angles, in radians
+            x = np.radians((xele - self.coff / 10.0) * 65536.0 / (self.cfac / 10.0))
+            y = np.radians((xlin - self.loff / 10.0) * 65536.0 / (self.lfac / 10.0))
+            cosx, cosy, sinx, siny = np.cos(x), np.cos(y), np.sin(x), np.sin(y)
+
+            aux = _GEOS_X42 * cosx * cosy
+            aux2 = cosy * cosy + _GEOS_FP * siny * siny
+            sdd = aux * aux - aux2 * _GEOS_D
+            misses = sdd < 0.0
+            sn = (aux - np.sqrt(np.where(misses, 0.0, sdd))) / aux2
+            s1 = _GEOS_X42 - sn * cosx * cosy
+            s2 = sn * sinx * cosy
+            s3 = -sn * siny
+            sxy = np.sqrt(s1 * s1 + s2 * s2)
+            lon = np.degrees(np.arctan(s2 / s1)) + self.plon / 10.0
+            lat = np.degrees(np.arctan(_GEOS_FP * s3 / sxy))
+            lon = np.where(lon > 180.0, lon - 360.0, np.where(lon < -180.0, lon + 360.0, lon))
+        return np.where(misses, np.nan, lat), np.where(misses, np.nan, lon)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is not seen from the satellite.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        r_pol2, r_eq2 = _GEOS_RADPOL ** 2, _GEOS_RADEQ ** 2
+        bres = self.bres
+        shift = (bres - 1) / 2.0 if self.pixelOffsetFlag == 1 else bres - 1
+        with np.errstate(invalid='ignore', divide='ignore'):
+            dlon = np.radians(lon) - math.radians(self.plon / 10.0)
+            c_lat = np.arctan(_GEOS_FP_INVERSE * np.tan(np.radians(lat)))
+            cosc_lat = np.cos(c_lat)
+            rl = _GEOS_RADPOL / np.sqrt(1.0 - ((r_eq2 - r_pol2) / r_eq2) * cosc_lat * cosc_lat)
+            r1 = _GEOS_X42 - rl * cosc_lat * np.cos(dlon)
+            r2 = -rl * cosc_lat * np.sin(dlon)
+            r3 = rl * np.sin(c_lat)
+            rn = np.sqrt(r1 * r1 + r2 * r2 + r3 * r3)
+
+            # is the point visible from the satellite?
+            ad2 = r1 * r1 + r2 * r2 + r3 * r3 * r_eq2 / r_pol2
+            bd = _GEOS_X42 * r1
+            delta2 = bd * bd - ad2 * (_GEOS_X42 ** 2 - r_eq2)
+            halfsom = bd * rn / ad2
+            visible = (delta2 >= 0.0) & (rn <= halfsom)
+
+            x = np.degrees(np.arctan(-r2 / r1))
+            y = np.degrees(np.arcsin(-r3 / rn))
+            xele = self.coff / 10.0 + x / 65536.0 * self.cfac / 10.0
+            xlin = self.loff / 10.0 + y / 65536.0 * self.lfac / 10.0
+            rlin = np.where(visible, xlin * bres - shift, np.nan)
+            rele = np.where(visible, xele * bres - shift, np.nan)
+        return self._image_to_area(rlin, rele)
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)
