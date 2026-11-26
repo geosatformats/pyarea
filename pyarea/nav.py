@@ -2714,3 +2714,112 @@ class MSATNav(AreaNav):
     def toLinEle2(self, lats=None, lons=None):
         """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
         return self.to_lin_ele(lats, lons)
+
+
+class MSGTNav(AreaNav):
+    """Navigation for Meteosat second generation (MET-8 to MET-11) AREA files, nav type MSGT.
+
+    Port of ``edu.wisc.ssec.mcidas.MSGTnav`` (``nvxmsgt.dlm`` of McIDAS-X). The image is on the 11136 x 11136 grid of
+    the high resolution visible channel; three of its pixels make one pixel of the 3712 x 3712 SEVIRI grid, which is
+    the grid of the HRIT scan angles. Both the lines and the elements are counted from the north-west corner of the
+    image, and the Earth is the ellipsoid with a flattening of 1/297 of Meteosat first generation. Words of the nav
+    block (counted from 1): 2 and 3 the line and element offsets of the scan grid (LOFF and COFF, x 10), 4 and 5 its
+    line and element factors (LFAC and CFAC, the HRIT values in units of 2**-16 degree times 1e6 / 2**16, so the
+    scan angle step is ``1e6 / factor`` degrees) and 6 the subpoint longitude in degrees x 10000, west positive.
+    """
+
+    labels = {1: 'MSGT',
+              2: 'line offset (LOFF) x 10',
+              3: 'element offset (COFF) x 10',
+              4: 'line factor (LFAC), 1e6 / degrees per step',
+              5: 'element factor (CFAC), 1e6 / degrees per step',
+              6: 'subpoint longitude, degrees x 10000, west positive'}
+
+    def __init__(self, navblock=None, auxblock=None, **kwargs):
+        if self.navtype.strip() != self.MSGT:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 6:
+            raise ValueError(f'The MSGT navigation block has {len(navblock)} words, 6 are needed.')
+        self.loff, self.coff, self.lfac, self.cfac = (int(v) for v in navblock[1:5])
+        if self.lfac == 0 or self.cfac == 0:
+            raise ValueError(f'The MSGT scale factors are {self.lfac} and {self.cfac}; they cannot be 0.')
+        self.sublon = -int(navblock[5]) / 10000.0  # east positive
+        self.deltax = 1.0 / (self.cfac / 1000000.0)
+        self.deltay = 1.0 / (self.lfac / 1000000.0)
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive. NaN where the line of sight misses the Earth, or the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        r, h, a, rp = _MSAT_EARTH_RADIUS, _MSAT_H, _MSAT_FLATTENING, _MSAT_RP
+        rs = r + h
+        yk = rs / r
+        with np.errstate(invalid='ignore', divide='ignore'):
+            xlin = ((11136.0 - image_line + 1.0) + 2.0) / 3.0
+            xele = ((11136.0 - image_elem + 1.0) + 2.0) / 3.0
+            xr = np.radians((xele - self.coff / 10.0) * self.deltax)
+            yr = np.radians((xlin - self.loff / 10.0) * self.deltay)
+            tanx, tany = np.tan(xr), np.tan(yr)
+            v1 = 1.0 + tanx * tanx
+            v2 = 1.0 + (tany * tany) * ((1.0 + a) * (1.0 + a))
+            misses = (v1 * v2) > ((yk * yk) / (yk * yk - 1))
+            vmu = (rs - r * np.sqrt(yk * yk - (yk * yk - 1) * v1 * v2)) / (v1 * v2)
+            xt = rs - vmu
+            yt = -vmu * tanx
+            zt = vmu * tany / np.cos(xr)
+            teta = np.arcsin(zt / rp)
+            lat = np.degrees(np.arctan(np.tan(teta) * r / rp))
+            lon = np.degrees(np.arctan(yt / xt)) + self.sublon
+        return np.where(misses, np.nan, lat), np.where(misses, np.nan, lon)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is not seen from the satellite (with the test of
+        the Java, which compares with the height of the satellite above the equatorial radius), or the input is NaN.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        r, h, rp = _MSAT_EARTH_RADIUS, _MSAT_H, _MSAT_RP
+        rs = r + h
+        with np.errstate(invalid='ignore', divide='ignore'):
+            xfi = np.radians(lat)
+            xla = np.radians(lon - self.sublon)
+            rom = r * rp / np.sqrt(rp * rp * np.cos(xfi) * np.cos(xfi) + r * r * np.sin(xfi) * np.sin(xfi))
+            y = np.sqrt(h * h + rom * rom - 2.0 * h * rom * np.cos(xfi) * np.cos(xla))
+            invisible = (y * y + rom * rom) > h * h
+            teta = np.arctan((rp / r) * np.tan(xfi))
+            xt = r * np.cos(teta) * np.cos(xla)
+            yt = r * np.cos(teta) * np.sin(xla)
+            zt = rp * np.sin(teta)
+            px = np.arctan(yt / (xt - rs))
+            py = np.arctan(-zt / (xt - rs) * np.cos(px))
+            xele = self.coff / 10.0 + np.degrees(px) / self.deltax
+            xlin = self.loff / 10.0 + np.degrees(py) / self.deltay
+            rlin = 11136.0 - (xlin * 3.0 - 2.0) + 1.0
+            rele = 11136.0 - (xele * 3.0 - 2.0) + 1.0
+        return self._image_to_area(np.where(invisible, np.nan, rlin), np.where(invisible, np.nan, rele))
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)

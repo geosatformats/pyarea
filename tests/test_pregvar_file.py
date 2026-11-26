@@ -325,7 +325,7 @@ class TestNavigation:
     def test_nav_type_without_array_navigation(self, tmp_path):
         """A nav type pyarea has no navigation for is reported, not mistaken for GOES."""
         words = np.zeros(640, dtype=">i4")
-        words[0] = int.from_bytes(b"MSGT", "big")
+        words[0] = int.from_bytes(b"KALP", "big")
         spec = FakeArea(GOES7_IR, mode_a_data([100]), nav_words=words, **IR_WINDOW)
         area = AreaFile(write_area_file(tmp_path / "lalo.area", spec))
         with pytest.raises(NotImplementedError):
