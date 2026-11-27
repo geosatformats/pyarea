@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyarea"
 version = "0.2.0.dev0"
-description = "A reader for McIDAS AREA files"
+description = "Python package for reading McIDAS AREA files"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
 license-files = ["LICENSE"]
