@@ -510,7 +510,7 @@ class AreaFile(BytesIO):
 
         Raises:
             ValueError: the file has no navigation block.
-            NotImplementedError: the navigation type has no vectorized ``to_latlon`` (e.g. LALO).
+            NotImplementedError: the navigation has no vectorized ``to_latlon`` (every navigation pyarea ports has one).
         """
         nav = self.navigation
         if nav is None:

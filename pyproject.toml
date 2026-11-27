@@ -1,18 +1,29 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyarea"
 version = "0.2.0.dev0"
 description = "Reader for McIDAS AREA files (python port of edu.wisc.ssec.mcidas)"
-readme = "README"
-license = { text = "LGPL-3.0-or-later" }
+readme = "README.md"
+license = "LGPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{ name = "Ioan Ferencik", email = "ferencikioan@gmail.com" },
 	   { name = "Kin Largadas" }
 	  ]
 requires-python = ">=3.10"
+keywords = ["McIDAS", "AREA", "satellite", "GOES", "McFETCH", "ADDE", "navigation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
 dependencies = ["numpy>=1.24", "numba", "pyproj"]
+
+[project.urls]
+Homepage = "https://github.com/geosatformats/pyarea"
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
