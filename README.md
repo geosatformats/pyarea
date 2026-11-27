@@ -88,14 +88,13 @@ a `TEMP` file with a scaling of 100 holds 29315 for 293.15 K.
 ```python
 area = AreaFile("mcfetch_band04.area")
 print(area.cal_type, area.directory.calibration_scale_factor)   # TEMP 100
-kelvin = area.read_calibrated("TEMP")      # not GVAR: the stored pixels divided by the scaling, float32
+kelvin = area.read_calibrated("TEMP")      # a file already in TEMP: its pixels divided by the scaling, float32
 lon, lat = area.get_lonlats()
 ```
 
-For a file that is not GVAR and already holds the requested type, `read_calibrated` returns its pixels (divided 
-by the scaling), and asking for another type raises a `ValueError`. A GVAR file is always run through 
-`GVARCalibrator`, which expects raw counts, so for a GVAR file that McFETCH has already calibrated use `read_data()` 
-and divide by the scaling yourself (as `scripts/mcfetch_to_npz.py` does).
+For a file that already holds the requested type (any source type, GVAR included), `read_calibrated` returns its
+pixels divided by the scaling, and asking for another type raises a `ValueError`. Only raw GVAR files go through
+`GVARCalibrator`. `read_ir_temperature_a` likewise returns the stored temperatures of a TEMP file.
 `area.directory.check(file_size)` lists problems it finds in a directory (an unknown sensor, an unsupported 
 pixel width, block offsets outside the file).
 
