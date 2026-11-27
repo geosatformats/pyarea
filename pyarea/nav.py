@@ -1134,9 +1134,21 @@ class LALONav(AreaNav):
         if min(begin_lat, begin_lon) < 0 or max(begin_lat, begin_lon) + self.numPoints > len(auxblock):
             raise ValueError(f'The LALO tables ({self.numPoints} values at words {begin_lat} and {begin_lon}) '
                              f'do not fit in the aux block of {len(auxblock)} words.')
-        aux = _float_bits(auxblock)
-        self.latData = aux[begin_lat:begin_lat + self.numPoints].copy()
-        self.lonData = aux[begin_lon:begin_lon + self.numPoints].copy()
+        # the tables are floats in the byte order the aux block was written in, which for a McFETCH file need not be
+        # the order of the rest of the file (a little-endian Kalpana-1 file has big-endian tables): take the order that
+        # gives the most usable tie points
+        best = None
+        for swap in (False, True):
+            words = np.asarray(auxblock, dtype=np.int64).astype(np.uint32)
+            aux = (words.byteswap() if swap else words).view(np.float32)
+            lat = aux[begin_lat:begin_lat + self.numPoints]
+            lon = aux[begin_lon:begin_lon + self.numPoints]
+            with np.errstate(invalid='ignore'):
+                usable = int(((lat >= -90.0) & (lat <= 90.0) & (lon >= -180.0) & (lon <= 360.0)
+                              & ~((lat == 0.0) & (lon == 0.0))).sum())
+            if best is None or usable > best[0]:
+                best = (usable, lat, lon)
+        self.latData, self.lonData = best[1].copy(), best[2].copy()
         with np.errstate(invalid='ignore'):
             bad = (self.latData < -90.0) | (self.latData > 90.0) | (self.lonData < -180.0) | (self.lonData > 360.0)
         self.latData[bad] = 0.0  # LAT_MISSING and LON_MISSING of the Java

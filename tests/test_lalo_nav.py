@@ -289,3 +289,23 @@ def test_a_file_is_located_through_its_aux_block(tmp_path, endian):
     got_lon, got_lat = area.get_lonlats()
     np.testing.assert_array_equal(got_lat, lat.astype(float))
     np.testing.assert_array_equal(got_lon, lon.astype(float))
+
+
+@pytest.mark.parametrize("order", [">", "<"])
+def test_tables_in_the_opposite_byte_order_to_the_nav_block_are_read(order):
+    """A little-endian McFETCH Kalpana-1 file has big-endian tables: take the order that gives usable tie points."""
+    lat, lon = make_tables(16, 24)
+    same = make_nav(lat, lon, order=order)
+    nav_words, aux_words = lalo_blocks(lat, lon, order=order, lat_offset=24)
+    swapped = np.asarray(aux_words, dtype=np.int64).astype(np.uint32).byteswap().view(np.int32)
+    nav = AreaNav(navblock=nav_words, auxblock=tuple(int(w) for w in swapped), byte_order=order, int_format="i")
+    nav.setImageStart(0, 0)
+    nav.setRes(1, 1)
+    nav.setMag(1, 1)
+    nav.setStart(0, 0)
+    lines, elems = np.meshgrid(np.arange(ULLINE, ULLINE + 100), np.arange(ULELEM, ULELEM + 60), indexing="ij")
+    got = nav.to_latlon(lines, elems)
+    want = same.to_latlon(lines, elems)
+    np.testing.assert_array_equal(got[0], want[0])
+    np.testing.assert_array_equal(got[1], want[1])
+    assert np.isfinite(got[0]).all()
