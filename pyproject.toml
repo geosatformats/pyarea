@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyarea"
 version = "0.2.0.dev0"
-description = "Reader for McIDAS AREA files (python port of edu.wisc.ssec.mcidas)"
+description = "A reader for McIDAS AREA files"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
 license-files = ["LICENSE"]
@@ -13,7 +13,6 @@ authors = [{ name = "Ioan Ferencik", email = "ferencikioan@gmail.com" },
 	   { name = "Kin Largadas" }
 	  ]
 requires-python = ">=3.10"
-keywords = ["McIDAS", "AREA", "satellite", "GOES", "McFETCH", "ADDE", "navigation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
