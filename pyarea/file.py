@@ -544,6 +544,18 @@ class AreaFile(BytesIO):
     def creation_datetime(self):
         return self.directory.creation_time
 
+    def _data_block_bytes(self):
+        """The data block as it goes in the file: each line's prefix as read, then its pixels in the file's byte
+        order and band-interleaved by pixel, from ``self.data`` (so a changed ``data`` is saved)."""
+        block = np.array(self._line_array())  # a copy: it keeps the line prefixes
+        pixels = np.asarray(self.data).transpose(1, 2, 0)  # (lines, elements, bands)
+        if self.datawidth != 1:
+            kind = 'i' if self.datawidth == 4 else 'u'
+            pixels = pixels.astype(np.dtype(f'{self.directory.byte_order}{kind}{self.datawidth}'))
+        pixel_bytes = np.ascontiguousarray(pixels).view(np.uint8).reshape(self.lines, self.line_data_len)
+        block[:, self.line_prefix_len:self.line_prefix_len + self.line_data_len] = pixel_bytes
+        return block.tobytes()
+
     def save(self, to_file_path=None, compress_level=None):
         """
         Saves the AreaFile to disk. Optionally supply a string representing the coverage of the AreaFile to be
@@ -571,10 +583,7 @@ class AreaFile(BytesIO):
                     aft.write(self.aux_bytes)
                 #if theer is not datLoc there si not AreaFile
                 aft.seek(self.data_offset)
-                #TODO line prefix bytes
-
-                for bi in range(self.num_bands):
-                    aft.write(self.data[bi,:,:].tobytes())
+                aft.write(self._data_block_bytes())
 
 
             if compress_level is not None:

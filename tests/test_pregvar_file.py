@@ -5,6 +5,7 @@ The files are small fake ones; see ``fake_area_files`` for how they are made. Th
 """
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -380,3 +381,29 @@ class TestMalformedFiles:
         path.write_bytes(bytes(100))
         with pytest.raises(ValueError, match="Truncated AREA directory"):
             AreaFile(str(path))
+
+
+@pytest.mark.parametrize("endian", [">", "<"])
+def test_save_writes_the_file_back_unchanged(tmp_path, endian):
+    """Two-byte pixels in the file's byte order, and the line prefixes of a Mode AA file, survive a save."""
+    from pyarea.file import AreaFile
+    from tests.fake_area_files import mode_aa_spec
+
+    spec = mode_aa_spec()
+    spec.endian = endian
+    original = write_area_file(tmp_path / "in.area", spec)
+    area = AreaFile(original)
+    saved = area.save(str(tmp_path / "out.area"))
+    assert Path(saved).read_bytes() == Path(original).read_bytes()
+
+
+def test_save_writes_changed_pixels(tmp_path):
+    from pyarea.file import AreaFile
+    from tests.fake_area_files import mode_aa_spec
+
+    original = write_area_file(tmp_path / "in.area", mode_aa_spec())
+    area = AreaFile(original)
+    area.data[0, 3, 5] = 4321
+    again = AreaFile(area.save(str(tmp_path / "out.area")))
+    assert again.read_data()[3, 5] == 4321
+    assert again.read_data()[0, 0] == area.read_data()[0, 0]
