@@ -3,7 +3,7 @@ import struct
 
 import pytest
 
-from pyarea.nav import ABINNav, AreaNav, GMSXNav, GOESNav, GVARNav, LALONav, RECTNav
+from pyarea.nav import ABINNav, AreaNav, GEOSNav, GMSXNav, GOESNav, GVARNav, LALONav, MSATNav, MSGTNav, RECTNav
 
 
 def _block(code, order=">"):
@@ -19,7 +19,8 @@ def _pick(code, order=">"):
 @pytest.mark.parametrize("order", [">", "<"])
 @pytest.mark.parametrize(
     ("code", "klass"),
-    [("GVAR", GVARNav), ("GOES", GOESNav), ("RECT", RECTNav), ("GMSX", GMSXNav), ("LALO", LALONav), ("ABIN", ABINNav)])
+    [("GVAR", GVARNav), ("GOES", GOESNav), ("RECT", RECTNav), ("GMSX", GMSXNav), ("LALO", LALONav), ("ABIN", ABINNav),
+     ("GEOS", GEOSNav), ("MSAT", MSATNav), ("MSGT", MSGTNav)])
 def test_nav_type_selects_the_class(code, klass, order):
     nav = _pick(code, order)
     assert type(nav) is klass
@@ -45,10 +46,9 @@ def test_navblock_and_byte_order_are_required():
         AreaNav(navblock=_block("GVAR"), byte_order=">")
 
 
-@pytest.mark.parametrize("code", ["LALO", "ABIN"])
-def test_navigations_that_are_not_ported_say_so(code):
-    with pytest.raises(NotImplementedError, match=code):
-        AreaNav(navblock=_block(code), byte_order=">", int_format="i")
+def test_navigations_that_are_not_ported_say_so():
+    with pytest.raises(NotImplementedError, match="KALP"):
+        AreaNav(navblock=_block("KALP"), byte_order=">", int_format="i")
 
 
 def test_gmsx_block_is_accepted_on_python_3():

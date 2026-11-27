@@ -977,9 +977,278 @@ class GVARNav(AreaNav):
         return self.sublat * self.DEG, self.sublon * self.DEG
 
 
+def _float_bits(words):
+    """Reinterpret 32-bit integer words (already decoded from the file's byte order) as floats, like intBitsToFloat."""
+    return np.asarray(words, dtype=np.int64).astype(np.uint32).view(np.float32)
+
+
+@_njit
+def _value_to_grid(sx, sy, vx, vy, length_x, length_y, pos):
+    """``Gridded2DSet.valueToGrid`` (VisAD) in float32: the grid coordinates of the points (vx, vy).
+
+    ``sx`` and ``sy`` are the x and y of the ``length_x`` x ``length_y`` grid points, x running fastest; ``pos`` is the
+    orientation of the grid. The grid box of the previous point is the first guess, and so is the choice of triangle.
+    """
+    n = vx.shape[0]
+    grid_x = np.full(n, np.nan, dtype=np.float32)
+    grid_y = np.full(n, np.nan, dtype=np.float32)
+    gx = (length_x - 1) // 2
+    gy = (length_y - 1) // 2
+    lowertri = True
+    one = np.float32(1.0)
+    for i in range(n):
+        if i != 0 and grid_x[i - 1] != grid_x[i - 1]:  # the last point had no solution: start in the middle again
+            gx = (length_x - 1) // 2
+            gy = (length_y - 1) // 2
+        for _ in range(2 * (length_x + length_y)):
+            k0 = gy * length_x + gx
+            k1 = k0 + 1
+            k2 = (gy + 1) * length_x + gx
+            k3 = k2 + 1
+            v0x, v0y, v1x, v1y = sx[k0], sy[k0], sx[k1], sy[k1]
+            v2x, v2y, v3x, v3y = sx[k2], sy[k2], sx[k3], sy[k3]
+            px, py = vx[i], vy[i]
+            # the diagonal D-B and the distances P-B and P-D are used in both triangles
+            bdx, bdy = v2x - v1x, v2y - v1y
+            bpx, bpy = px - v1x, py - v1y
+            dpx, dpy = px - v2x, py - v2y
+            ogx, ogy = gx, gy
+            if lowertri:
+                abx, aby = v1x - v0x, v1y - v0y
+                dax, day = v0x - v2x, v0y - v2y
+                apx, apy = px - v0x, py - v0y
+                tval1 = abx * apy - aby * apx
+                tval2 = bdx * bpy - bdy * bpx
+                tval3 = dax * dpy - day * dpx
+                test1 = (tval1 == 0) or ((tval1 > 0) == pos)
+                test2 = (tval2 == 0) or ((tval2 > 0) == pos)
+                test3 = (tval3 == 0) or ((tval3 > 0) == pos)
+                if not test1 and not test2:  # up and right
+                    gx += 1
+                    gy -= 1
+                elif not test2 and not test3:  # down and left
+                    gx -= 1
+                    gy += 1
+                elif not test1 and not test3:  # up and left
+                    gx -= 1
+                    gy -= 1
+                elif not test1:  # up
+                    gy -= 1
+                elif not test3:  # left
+                    gx -= 1
+                gx = min(max(gx, 0), length_x - 2)
+                gy = min(max(gy, 0), length_y - 2)
+                if gx == ogx and gy == ogy and test2:  # the right triangle: solve with the reverse interpolation
+                    grid_x[i] = (((px - v0x) * (v2y - v0y) + (v0y - py) * (v2x - v0x))
+                                 / ((v1x - v0x) * (v2y - v0y) + (v0y - v1y) * (v2x - v0x)) + np.float32(gx))
+                    grid_y[i] = (((px - v0x) * (v1y - v0y) + (v0y - py) * (v1x - v0x))
+                                 / ((v2x - v0x) * (v1y - v0y) + (v0y - v2y) * (v1x - v0x)) + np.float32(gy))
+                    break
+                lowertri = False
+            else:
+                bcx, bcy = v3x - v1x, v3y - v1y
+                cdx, cdy = v2x - v3x, v2y - v3y
+                cpx, cpy = px - v3x, py - v3y
+                tval1 = bcx * bpy - bcy * bpx
+                tval2 = cdx * cpy - cdy * cpx
+                tval3 = bdx * dpy - bdy * dpx
+                test1 = (tval1 == 0) or ((tval1 > 0) == pos)
+                test2 = (tval2 == 0) or ((tval2 > 0) == pos)
+                test3 = (tval3 == 0) or ((tval3 < 0) == pos)
+                if not test1 and not test3:  # up and right
+                    gx += 1
+                    gy -= 1
+                elif not test2 and not test3:  # down and left
+                    gx -= 1
+                    gy += 1
+                elif not test1 and not test2:  # down and right
+                    gx += 1
+                    gy += 1
+                elif not test1:  # right
+                    gx += 1
+                elif not test2:  # down
+                    gy += 1
+                gx = min(max(gx, 0), length_x - 2)
+                gy = min(max(gy, 0), length_y - 2)
+                if gx == ogx and gy == ogy and test3:
+                    grid_x[i] = (((v3x - px) * (v1y - v3y) + (py - v3y) * (v1x - v3x))
+                                 / ((v2x - v3x) * (v1y - v3y) - (v2y - v3y) * (v1x - v3x)) + np.float32(gx)) + one
+                    grid_y[i] = (((v2y - v3y) * (v3x - px) + (v2x - v3x) * (py - v3y))
+                                 / ((v1x - v3x) * (v2y - v3y) - (v2x - v3x) * (v1y - v3y)) + np.float32(gy)) + one
+                    break
+                lowertri = True
+        if (grid_x[i] >= length_x - 0.5 or grid_y[i] >= length_y - 0.5
+                or grid_x[i] <= -0.5 or grid_y[i] <= -0.5):
+            grid_x[i] = np.nan
+            grid_y[i] = np.nan
+    return grid_x, grid_y
+
+
 class LALONav(AreaNav):
+    """Navigation from tables of latitude and longitude, nav type LALO (Kalpana-1 and others).
+
+    Port of ``edu.wisc.ssec.mcidas.LALOnav`` (``laloutil.c`` of McIDAS-X). The nav block describes a grid of
+    ``rows`` x ``cols`` tie points, one every ``latres`` image lines and ``lonres`` image elements from the image
+    position ``ulline``/``ulelem``, and the aux block holds the float32 latitude and longitude of each of them. Words of
+    the nav block (counted from 1): 66 and 67 the number of rows and columns, 68-71 the minimum and maximum latitude
+    and longitude (floats), 72 and 73 the line and element spacing, 74 and 75 the table position inside the image
+    (unused), 76 and 77 the image line and element of the first tie point, 78 the size of the aux block, 79 and 80
+    the byte offsets of the latitude and longitude tables within the aux block.
+
+    ``to_latlon`` interpolates between the four surrounding tie points like the Java, which truncates the line and
+    element to a whole number of image pixels first. Tie points with a latitude or longitude outside -90 to 90 and
+    -180 to 360 are missing (stored as 0, 0), and so is any pixel next to one. ``to_lin_ele`` is
+    ``Gridded2DSet.valueToGrid`` of VisAD, which interpolates linearly on the two triangles of each grid box (not
+    bilinearly as ``to_latlon`` does), so the two directions differ slightly between the tie points.
+    """
+
+    labels = {1: 'LALO', 66: 'rows', 67: 'columns', 68: 'minimum latitude', 69: 'minimum longitude',
+              70: 'maximum latitude', 71: 'maximum longitude', 72: 'line spacing', 73: 'element spacing',
+              76: 'image line of the first tie point', 77: 'image element of the first tie point',
+              78: 'size of the aux block', 79: 'byte offset of the latitudes', 80: 'byte offset of the longitudes'}
+
     def __init__(self, navblock=None, auxblock=None, **kwargs):
-        raise NotImplementedError('LALO (latitude/longitude grid) navigation is not implemented')
+        if self.navtype.strip() != self.LALO:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 80:
+            raise ValueError(f'The LALO navigation block has {len(navblock)} words, 80 are needed.')
+        if auxblock is None or len(auxblock) == 0:
+            raise ValueError('LALO navigation needs the aux block of the file, which holds the latitudes '
+                             'and longitudes.')
+        self.rows, self.cols = int(navblock[65]), int(navblock[66])
+        bounds = _float_bits(navblock[67:71])
+        self.minlat, self.minlon, self.maxlat, self.maxlon = (float(v) for v in bounds)
+        self.latres, self.lonres = int(navblock[71]), int(navblock[72])
+        self.latpoint, self.lonpoint = int(navblock[73]), int(navblock[74])
+        self.ulline, self.ulelem = int(navblock[75]), int(navblock[76])
+        self.aux_size, self.lat_aux_offset, self.lon_aux_offset = (int(v) for v in navblock[77:80])
+        if self.rows < 1 or self.cols < 1:
+            raise ValueError(f'The LALO navigation block has {self.rows} rows and {self.cols} columns.')
+        if self.latres < 1 or self.lonres < 1:
+            raise ValueError(f'The LALO tie point spacing is {self.latres} lines by {self.lonres} elements.')
+        self.lrlin = self.ulline + (self.rows - 1) * self.latres
+        self.lrele = self.ulelem + (self.cols - 1) * self.lonres
+
+        self.numPoints = self.rows * self.cols
+        begin_lat, begin_lon = self.lat_aux_offset // 4, self.lon_aux_offset // 4
+        if min(begin_lat, begin_lon) < 0 or max(begin_lat, begin_lon) + self.numPoints > len(auxblock):
+            raise ValueError(f'The LALO tables ({self.numPoints} values at words {begin_lat} and {begin_lon}) '
+                             f'do not fit in the aux block of {len(auxblock)} words.')
+        # the tables are floats in the byte order the aux block was written in, which for a McFETCH file need not be
+        # the order of the rest of the file (a little-endian Kalpana-1 file has big-endian tables): take the order that
+        # gives the most usable tie points
+        best = None
+        for swap in (False, True):
+            words = np.asarray(auxblock, dtype=np.int64).astype(np.uint32)
+            aux = (words.byteswap() if swap else words).view(np.float32)
+            lat = aux[begin_lat:begin_lat + self.numPoints]
+            lon = aux[begin_lon:begin_lon + self.numPoints]
+            with np.errstate(invalid='ignore'):
+                usable = int(((lat >= -90.0) & (lat <= 90.0) & (lon >= -180.0) & (lon <= 360.0)
+                              & ~((lat == 0.0) & (lon == 0.0))).sum())
+            if best is None or usable > best[0]:
+                best = (usable, lat, lon)
+        self.latData, self.lonData = best[1].copy(), best[2].copy()
+        with np.errstate(invalid='ignore'):
+            bad = (self.latData < -90.0) | (self.latData > 90.0) | (self.lonData < -180.0) | (self.lonData > 360.0)
+        self.latData[bad] = 0.0  # LAT_MISSING and LON_MISSING of the Java
+        self.lonData[bad] = 0.0
+        self._samples = None
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        NaN outside the table, where a neighbouring tie point is missing, and where the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        rlin, rele = image_line.ravel(), image_elem.ravel()
+        lat = np.full(rlin.shape, np.nan)
+        lon = np.full(rlin.shape, np.nan)
+        with np.errstate(invalid='ignore'):
+            inside = ((rlin >= self.ulline) & (rlin <= self.lrlin) & (rele >= self.ulelem) & (rele <= self.lrele))
+        if inside.any():
+            # the Java truncates to whole image pixels (int) before it takes the cell and the fractions
+            dline = np.trunc(rlin[inside]).astype(np.int64) - self.ulline
+            delem = np.trunc(rele[inside]).astype(np.int64) - self.ulelem
+            row, col = dline // self.latres, delem // self.lonres
+            tl = row * self.cols + col
+            tr, bl = tl + 1, tl + self.cols
+            br = bl + 1
+            last_row = row >= self.rows - 1
+            bl = np.where(last_row, tl, bl)
+            br = np.where(last_row, bl + 1, br)
+            last_col = col >= self.cols - 1
+            tr = np.where(last_col, tl, tr)
+            br = np.where(last_col, bl, br)
+
+            frac_row = (dline % self.latres).astype(np.float32) / np.float32(self.latres)
+            frac_col = (delem % self.lonres).astype(np.float32) / np.float32(self.lonres)
+            missing = np.zeros(tl.shape, dtype=bool)
+            values = []
+            for table in (self.latData, self.lonData):
+                values.append([table[i] for i in (tl, tr, bl, br)])
+            for corner in range(4):
+                missing |= (values[0][corner] == 0.0) & (values[1][corner] == 0.0)
+            out = []
+            for tl_v, tr_v, bl_v, br_v in values:
+                ax, bx, cx = tr_v - tl_v, bl_v - tl_v, (tl_v + br_v) - (bl_v + tr_v)
+                out.append(ax * frac_col + bx * frac_row + cx * frac_row * frac_col + tl_v)
+            lat[inside] = np.where(missing, np.nan, out[0])
+            lon[inside] = np.where(missing, np.nan, out[1])
+        return lat.reshape(line.shape), lon.reshape(line.shape)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates, NaN where VisAD finds no grid box for the point (outside the table,
+        or next to a missing tie point). Like the Java this is ``Gridded2DSet.valueToGrid`` in float32: a walk over
+        the grid triangles that starts in the middle of the table and carries on from the box of the previous point.
+        A longitude is compared with the table as it is (0 to 360 tables need 0 to 360 longitudes).
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        if self.rows < 2 or self.cols < 2:  # VisAD refuses, and the Java returns null
+            grid_x = grid_y = np.full(lat.size, np.nan, dtype=np.float32)
+        else:
+            if self._samples is None:
+                with np.errstate(invalid='ignore'):
+                    missing = (self.latData == 0.0) & (self.lonData == 0.0)
+                self._samples = (np.where(missing, np.float32(np.nan), self.lonData).astype(np.float32),
+                                 np.where(missing, np.float32(np.nan), self.latData).astype(np.float32))
+            sample_x, sample_y = self._samples
+            with np.errstate(invalid='ignore'):
+                # the orientation of the grid, from its first box (Gridded2DSet.Pos)
+                xpos = ((sample_x[1] - sample_x[0]) * (sample_y[self.cols + 1] - sample_y[1])
+                        - (sample_y[1] - sample_y[0]) * (sample_x[self.cols + 1] - sample_x[1]))
+            grid_x, grid_y = _value_to_grid(sample_x, sample_y, np.ascontiguousarray(lon.ravel(), dtype=np.float32),
+                                            np.ascontiguousarray(lat.ravel(), dtype=np.float32), self.cols, self.rows,
+                                            bool(xpos > 0))
+        line = self.ulline + self.latres * grid_y.astype(float)
+        elem = self.ulelem + self.lonres * grid_x.astype(float)
+        line, elem = self._image_to_area(line, elem)
+        return line.reshape(lat.shape), elem.reshape(lat.shape)
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not found."""
+        return self.to_lin_ele(lats, lons)
 
 
 # the nav block of a "GOES" file starts with the 4 ASCII bytes of the nav type code AreaNav already defines
@@ -2097,7 +2366,472 @@ class GMSXNav(AreaNav):
 
 
 
+# The constants of ABINnav.java (nvxabin.dlm of McIDAS-X): the GRS 80 ellipsoid of the GOES-R fixed grid.
+_ABIN_DH = 42164.16  # radius of the satellite orbit, km
+_ABIN_REQ = 6378.137  # radius of the Earth at the equator, km
+_ABIN_RPO = 6356.7523  # radius of the Earth at the poles, km
+_ABIN_FP = 1.006803  # (equatorial / polar radius) squared, as McIDAS has it
+_ABIN_D = _ABIN_DH * _ABIN_DH - _ABIN_REQ * _ABIN_REQ
+
+
 class ABINNav(AreaNav):
+    """Navigation for GOES-R ABI fixed grid AREA files, nav type ABIN.
+
+    Port of ``edu.wisc.ssec.mcidas.ABINnav`` (``nvxabin.dlm`` of McIDAS-X). The image line and element give the
+    ABI scan angles linearly, and the angles give the Earth location on the ellipsoid, as in the GOES-R Product
+    User's Guide. Words of the nav block: 2 and 3 the line and element offsets of the scan angles and 4 and 5 their
+    scale factors (radians x 1e8), 6 the subpoint longitude (degrees east x 10), 7 the base resolution.
+    """
+
+    labels = {1: 'ABIN',
+              2: 'line offset of the scan angle, radians x 1e8',
+              3: 'element offset of the scan angle, radians x 1e8',
+              4: 'line scale factor, radians per line x 1e8',
+              5: 'element scale factor, radians per element x 1e8',
+              6: 'subpoint longitude, degrees east x 10',
+              7: 'base resolution'}
 
     def __init__(self, navblock=None, auxblock=None, **kwargs):
-        raise NotImplementedError('ABIN (GOES-R ABI fixed grid) navigation is not implemented')
+        if self.navtype.strip() != self.ABIN:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 7:
+            raise ValueError(f'The ABIN navigation block has {len(navblock)} words, 7 are needed.')
+        self.loff = navblock[1] / 100000000.0
+        self.coff = navblock[2] / 100000000.0
+        self.lfac = navblock[3] / 100000000.0
+        self.cfac = navblock[4] / 100000000.0
+        self.plon = navblock[5] / 10.0
+        self.bres = float(navblock[6])
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive, in -180 to 180. NaN where the line of sight misses the Earth, or the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        dh, fp = _ABIN_DH, _ABIN_FP
+        with np.errstate(invalid='ignore', divide='ignore'):
+            # image coordinates are in base resolution units; the scan angles are linear in the pixels
+            xlin = (image_line - (self.bres - 1) / 2.0) / self.bres
+            xele = (image_elem - (self.bres - 1) / 2.0) / self.bres
+            theta_goes = xlin * self.lfac + self.loff
+            lamda_goes = xele * self.cfac + self.coff
+            # GOES to GEOS scan angles
+            theta_geos = np.arcsin(np.sin(theta_goes) * np.cos(lamda_goes))
+            lamda_geos = np.arctan(np.tan(lamda_goes) / np.cos(theta_goes))
+            cosx, cosy = np.cos(lamda_geos), np.cos(theta_geos)
+            sinx, siny = np.sin(lamda_geos), np.sin(theta_geos)
+
+            a = dh * cosx * cosy
+            k = cosy * cosy + fp * siny * siny
+            sdd = a * a - k * _ABIN_D
+            misses = sdd < 0.0
+            sn = (a - np.sqrt(np.where(misses, 0.0, sdd))) / k
+            s1 = dh - sn * cosx * cosy
+            s2 = sn * sinx * cosy
+            s3 = -(sn * siny)
+            sxy = np.sqrt(s1 * s1 + s2 * s2)
+            lon = np.degrees(np.arctan(s2 / s1) + math.radians(self.plon))
+            lat = np.degrees(np.arctan(-(fp * s3 / sxy)))
+            lon = np.where(lon > 180, lon - 360.0, np.where(lon < -180, lon + 360.0, lon))
+        return np.where(misses, np.nan, lat), np.where(misses, np.nan, lon)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is on the far side of the Earth. As in
+        VisAD, a point just beyond the limb still gets the scan angles it would have.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        dh, req2, rpo2 = _ABIN_DH, _ABIN_REQ ** 2, _ABIN_RPO ** 2
+        with np.errstate(invalid='ignore', divide='ignore'):
+            geographic_lat = np.radians(lat)
+            dlon = np.radians(lon) - math.radians(self.plon)
+            geocentric_lat = np.arctan(rpo2 / req2 * np.tan(geographic_lat))
+            cos_gc = np.cos(geocentric_lat)
+            r_earth = _ABIN_RPO / np.sqrt(1.0 - (req2 - rpo2) / req2 * cos_gc * cos_gc)
+            r_1 = dh - r_earth * cos_gc * np.cos(dlon)
+            r_2 = -(r_earth * cos_gc * np.sin(dlon))
+            r_3 = r_earth * np.sin(geocentric_lat)
+            lamda = np.arcsin(-(r_2 / np.sqrt(r_1 * r_1 + r_2 * r_2 + r_3 * r_3)))
+            theta = np.arctan(r_3 / r_1)
+            xlin = (theta - self.loff) / self.lfac * self.bres + (self.bres - 1) / 2.0
+            xele = (lamda - self.coff) / self.cfac * self.bres + (self.bres - 1) / 2.0
+            far_side = r_1 > dh
+        line, elem = self._image_to_area(np.where(far_side, np.nan, xlin), np.where(far_side, np.nan, xele))
+        return line, elem
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)
+
+
+# The constants of GEOSnav.java (nvxgeos.dlm of McIDAS-X): EUMETSAT's LRIT/HRIT Global Specification (CGMS 03).
+_GEOS_RADPOL = 6356.5838  # radius of the Earth at the poles, km
+_GEOS_RADEQ = 6378.1690  # radius of the Earth at the equator, km
+_GEOS_X42 = 42164.0  # radius of the satellite orbit, km
+_GEOS_FP = 1.006803  # (equatorial / polar radius) squared, as in the forward formulas
+_GEOS_FP_INVERSE = 0.993243  # (polar / equatorial radius) squared, as in the inverse formulas
+_GEOS_D = 1737121856.0  # X42 ** 2 - RADEQ ** 2, typed in as a constant in the Java
+
+
+class GEOSNav(AreaNav):
+    """Navigation for geostationary AREA files laid out as in the LRIT/HRIT specification, nav type GEOS.
+
+    Port of ``edu.wisc.ssec.mcidas.GEOSnav`` (``nvxgeos.dlm`` of McIDAS-X), used for Himawari, COMS-1 and the
+    MPEF/OSIS products. The image line and element are the HRIT column and line numbers (``COFF``, ``LOFF``,
+    ``CFAC``, ``LFAC``), with the scan angle in units of 2**-16 degrees. Words of the nav block: 2 and 3 the line and
+    element offsets (x 10), 4 and 5 the line and element scale factors (x 10), 6 the subpoint longitude (degrees east
+    x 10), 7 the base resolution (default 1) and 8 the pixel offset flag (1 for the half pixel convention of AHI).
+    """
+
+    labels = {1: 'GEOS',
+              2: 'line offset (LOFF) x 10',
+              3: 'element offset (COFF) x 10',
+              4: 'line scale factor (LFAC) x 10',
+              5: 'element scale factor (CFAC) x 10',
+              6: 'subpoint longitude, degrees east x 10',
+              7: 'base resolution',
+              8: 'pixel offset flag (1: half pixel adjustment as for AHI)'}
+
+    def __init__(self, navblock=None, auxblock=None, **kwargs):
+        if self.navtype.strip() != self.GEOS:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 6:
+            raise ValueError(f'The GEOS navigation block has {len(navblock)} words, 6 are needed.')
+        self.loff = int(navblock[1])
+        self.coff = int(navblock[2])
+        self.lfac = int(navblock[3])
+        self.cfac = int(navblock[4])
+        self.plon = int(navblock[5])
+        self.bres = int(navblock[6]) if len(navblock) > 6 and navblock[6] > 0 else 1
+        self.pixelOffsetFlag = int(navblock[7]) if len(navblock) > 7 and navblock[7] > 0 else 0
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive, in -180 to 180. NaN where the line of sight misses the Earth, or the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        bres = self.bres
+        shift = (bres - 1) / 2.0 if self.pixelOffsetFlag == 1 else bres - 1
+        with np.errstate(invalid='ignore', divide='ignore'):
+            xlin = (image_line + shift) / bres
+            xele = (image_elem + shift) / bres
+            # the scan angles, in radians
+            x = np.radians((xele - self.coff / 10.0) * 65536.0 / (self.cfac / 10.0))
+            y = np.radians((xlin - self.loff / 10.0) * 65536.0 / (self.lfac / 10.0))
+            cosx, cosy, sinx, siny = np.cos(x), np.cos(y), np.sin(x), np.sin(y)
+
+            aux = _GEOS_X42 * cosx * cosy
+            aux2 = cosy * cosy + _GEOS_FP * siny * siny
+            sdd = aux * aux - aux2 * _GEOS_D
+            misses = sdd < 0.0
+            sn = (aux - np.sqrt(np.where(misses, 0.0, sdd))) / aux2
+            s1 = _GEOS_X42 - sn * cosx * cosy
+            s2 = sn * sinx * cosy
+            s3 = -sn * siny
+            sxy = np.sqrt(s1 * s1 + s2 * s2)
+            lon = np.degrees(np.arctan(s2 / s1)) + self.plon / 10.0
+            lat = np.degrees(np.arctan(_GEOS_FP * s3 / sxy))
+            lon = np.where(lon > 180.0, lon - 360.0, np.where(lon < -180.0, lon + 360.0, lon))
+        return np.where(misses, np.nan, lat), np.where(misses, np.nan, lon)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is not seen from the satellite.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        r_pol2, r_eq2 = _GEOS_RADPOL ** 2, _GEOS_RADEQ ** 2
+        bres = self.bres
+        shift = (bres - 1) / 2.0 if self.pixelOffsetFlag == 1 else bres - 1
+        with np.errstate(invalid='ignore', divide='ignore'):
+            dlon = np.radians(lon) - math.radians(self.plon / 10.0)
+            c_lat = np.arctan(_GEOS_FP_INVERSE * np.tan(np.radians(lat)))
+            cosc_lat = np.cos(c_lat)
+            rl = _GEOS_RADPOL / np.sqrt(1.0 - ((r_eq2 - r_pol2) / r_eq2) * cosc_lat * cosc_lat)
+            r1 = _GEOS_X42 - rl * cosc_lat * np.cos(dlon)
+            r2 = -rl * cosc_lat * np.sin(dlon)
+            r3 = rl * np.sin(c_lat)
+            rn = np.sqrt(r1 * r1 + r2 * r2 + r3 * r3)
+
+            # is the point visible from the satellite?
+            ad2 = r1 * r1 + r2 * r2 + r3 * r3 * r_eq2 / r_pol2
+            bd = _GEOS_X42 * r1
+            delta2 = bd * bd - ad2 * (_GEOS_X42 ** 2 - r_eq2)
+            halfsom = bd * rn / ad2
+            visible = (delta2 >= 0.0) & (rn <= halfsom)
+
+            x = np.degrees(np.arctan(-r2 / r1))
+            y = np.degrees(np.arcsin(-r3 / rn))
+            xele = self.coff / 10.0 + x / 65536.0 * self.cfac / 10.0
+            xlin = self.loff / 10.0 + y / 65536.0 * self.lfac / 10.0
+            rlin = np.where(visible, xlin * bres - shift, np.nan)
+            rele = np.where(visible, xele * bres - shift, np.nan)
+        return self._image_to_area(rlin, rele)
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)
+
+
+# The constants of MSATnav.java (nvxmsat.dlm of McIDAS-X), the Meteosat first generation images
+_MSAT_NOMORB = 42164.0  # nominal radial distance of the satellite, km
+_MSAT_EARTH_RADIUS = 6378.155  # radius of the Earth at the equator, km
+_MSAT_H = _MSAT_NOMORB - _MSAT_EARTH_RADIUS  # height of the satellite above the equatorial radius
+_MSAT_FLATTENING = 1.0 / 297.0
+_MSAT_RP = _MSAT_EARTH_RADIUS / (1.0 + _MSAT_FLATTENING)  # radius of the Earth at the poles
+_MSAT_DELTA = 18.0 / 2500.0  # degrees of scan angle per step of 2 image pixels
+
+
+class MSATNav(AreaNav):
+    """Navigation for Meteosat first generation (MET-1 to MET-7) AREA files, nav type MSAT.
+
+    Port of ``edu.wisc.ssec.mcidas.MSATnav`` (``nvxmsat.dlm`` of McIDAS-X). The images are 5000 x 5000 pixels (two
+    image pixels per step of the 2500 x 2500 scan grid, ``18/2500`` degrees each) and the Earth is an ellipsoid with a
+    flattening of 1/297. Words of the nav block (counted from 1): 4, 5 and 6 the three offsets of the scan grid and 7
+    the longitude of the subpoint as a packed integer (DDDMMSS, west positive as in McIDAS).
+
+    The reverse direction of the Java hard-codes the centre of the grid (5000 lines, i.e. 1250 for word 6), so
+    ``to_lin_ele`` is only the inverse of ``to_latlon`` for files whose third offset is 1250, which is the case for
+    the real ones.
+    """
+
+    labels = {1: 'MSAT',
+              4: 'offset 1 of the scan grid',
+              5: 'offset 2 of the scan grid',
+              6: 'offset 3 of the scan grid (1250)',
+              7: 'subpoint longitude, packed DDDMMSS, west positive'}
+
+    def __init__(self, navblock=None, auxblock=None, **kwargs):
+        if self.navtype.strip() != self.MSAT:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 7:
+            raise ValueError(f'The MSAT navigation block has {len(navblock)} words, 7 are needed.')
+        self.ioff = tuple(int(v) for v in navblock[3:6])
+        self.sublon = utils.mcPI2F(navblock[6])
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive. NaN where the line of sight misses the Earth, or the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        r, h, a, rp = _MSAT_EARTH_RADIUS, _MSAT_H, _MSAT_FLATTENING, _MSAT_RP
+        with np.errstate(invalid='ignore', divide='ignore'):
+            x = np.radians((1250.5 - image_elem / 2.0) * _MSAT_DELTA)
+            y = np.radians((self.ioff[2] - (image_line / 2.0 + self.ioff[1] - self.ioff[0])) * _MSAT_DELTA)
+            rs = r + h
+            tanx, tany = np.tan(x), np.tan(y)
+            val1 = 1.0 + tanx * tanx
+            val2 = 1.0 + (tany * tany) * ((1.0 + a) * (1.0 + a))
+            yk = rs / r
+            misses = (val1 * val2) > ((yk * yk) / (yk * yk - 1))
+            vmu = (rs - r * np.sqrt(yk * yk - (yk * yk - 1) * val1 * val2)) / (val1 * val2)
+            # the reference longitude of the Java is 0: cos = 1 and sin = 0
+            xt = rs + vmu * (-1.0)
+            yt = -(vmu * tanx)
+            zt = vmu * tany / np.cos(x)
+            teta = np.arcsin(zt / rp)
+            lat = np.degrees(np.arctan(np.tan(teta) * r / rp))
+            lon = -(-np.degrees(np.arctan(yt / xt)) + self.sublon)  # the subpoint is west positive; east positive out
+        return np.where(misses, np.nan, lat), np.where(misses, np.nan, lon)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is not seen from the satellite (with the test of
+        the Java, which compares with the height of the satellite above the equatorial radius).
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        r, h, rp = _MSAT_EARTH_RADIUS, _MSAT_H, _MSAT_RP
+        with np.errstate(invalid='ignore', divide='ignore'):
+            xfi = np.radians(lat)
+            xla = np.radians(lon + self.sublon)
+            rom = (r * rp) / np.sqrt(rp * rp * np.cos(xfi) * np.cos(xfi) + r * r * np.sin(xfi) * np.sin(xfi))
+            y = np.sqrt(h * h + rom * rom - 2 * h * rom * np.cos(xfi) * np.cos(xla))
+            invisible = (y * y + rom * rom) > h * h
+            rs = r + h
+            teta = np.arctan((rp / r) * np.tan(xfi))
+            xt = r * np.cos(teta) * np.cos(xla)
+            yt = r * np.cos(teta) * np.sin(xla)
+            zt = rp * np.sin(teta)
+            # the reference longitude of the Java is 0: cos = 1 and sin = 0
+            px = np.arctan(yt / (xt - rs))
+            py = np.arctan(zt * ((np.tan(px) * 0.0 - 1.0) / (xt - rs)) * np.cos(px))
+            xr = np.degrees(px) / _MSAT_DELTA
+            yr = np.degrees(py) / _MSAT_DELTA
+            xr = (1250.5 - xr) * 2
+            yr = 5000 - (yr + self.ioff[2] + self.ioff[1] - self.ioff[0]) * 2
+        return self._image_to_area(np.where(invisible, np.nan, yr), np.where(invisible, np.nan, xr))
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)
+
+
+class MSGTNav(AreaNav):
+    """Navigation for Meteosat second generation (MET-8 to MET-11) AREA files, nav type MSGT.
+
+    Port of ``edu.wisc.ssec.mcidas.MSGTnav`` (``nvxmsgt.dlm`` of McIDAS-X). The image is on the 11136 x 11136 grid of
+    the high resolution visible channel; three of its pixels make one pixel of the 3712 x 3712 SEVIRI grid, which is
+    the grid of the HRIT scan angles. Both the lines and the elements are counted from the north-west corner of the
+    image, and the Earth is the ellipsoid with a flattening of 1/297 of Meteosat first generation. Words of the nav
+    block (counted from 1): 2 and 3 the line and element offsets of the scan grid (LOFF and COFF, x 10), 4 and 5 its
+    line and element factors (LFAC and CFAC, the HRIT values in units of 2**-16 degree times 1e6 / 2**16, so the
+    scan angle step is ``1e6 / factor`` degrees) and 6 the subpoint longitude in degrees x 10000, west positive.
+    """
+
+    labels = {1: 'MSGT',
+              2: 'line offset (LOFF) x 10',
+              3: 'element offset (COFF) x 10',
+              4: 'line factor (LFAC), 1e6 / degrees per step',
+              5: 'element factor (CFAC), 1e6 / degrees per step',
+              6: 'subpoint longitude, degrees x 10000, west positive'}
+
+    def __init__(self, navblock=None, auxblock=None, **kwargs):
+        if self.navtype.strip() != self.MSGT:
+            raise ValueError(f'Invalid navigation type: {self.navtype!r}')
+        if len(navblock) < 6:
+            raise ValueError(f'The MSGT navigation block has {len(navblock)} words, 6 are needed.')
+        self.loff, self.coff, self.lfac, self.cfac = (int(v) for v in navblock[1:5])
+        if self.lfac == 0 or self.cfac == 0:
+            raise ValueError(f'The MSGT scale factors are {self.lfac} and {self.cfac}; they cannot be 0.')
+        self.sublon = -int(navblock[5]) / 10000.0  # east positive
+        self.deltax = 1.0 / (self.cfac / 1000000.0)
+        self.deltay = 1.0 / (self.lfac / 1000000.0)
+
+    def to_latlon(self, line, elem):
+        """Convert line/element (AREA/file coordinates, any shape, broadcast together) to ``(lat, lon)`` degrees.
+
+        East longitude is positive. NaN where the line of sight misses the Earth, or the input is NaN.
+        """
+        line, elem = np.broadcast_arrays(np.asarray(line, dtype=float), np.asarray(elem, dtype=float))
+        image_line, image_elem = self._area_to_image(line, elem)
+        r, h, a, rp = _MSAT_EARTH_RADIUS, _MSAT_H, _MSAT_FLATTENING, _MSAT_RP
+        rs = r + h
+        yk = rs / r
+        with np.errstate(invalid='ignore', divide='ignore'):
+            xlin = ((11136.0 - image_line + 1.0) + 2.0) / 3.0
+            xele = ((11136.0 - image_elem + 1.0) + 2.0) / 3.0
+            xr = np.radians((xele - self.coff / 10.0) * self.deltax)
+            yr = np.radians((xlin - self.loff / 10.0) * self.deltay)
+            tanx, tany = np.tan(xr), np.tan(yr)
+            v1 = 1.0 + tanx * tanx
+            v2 = 1.0 + (tany * tany) * ((1.0 + a) * (1.0 + a))
+            misses = (v1 * v2) > ((yk * yk) / (yk * yk - 1))
+            vmu = (rs - r * np.sqrt(yk * yk - (yk * yk - 1) * v1 * v2)) / (v1 * v2)
+            xt = rs - vmu
+            yt = -vmu * tanx
+            zt = vmu * tany / np.cos(xr)
+            teta = np.arcsin(zt / rp)
+            lat = np.degrees(np.arctan(np.tan(teta) * r / rp))
+            lon = np.degrees(np.arctan(yt / xt)) + self.sublon
+        return np.where(misses, np.nan, lat), np.where(misses, np.nan, lon)
+
+    def to_lin_ele(self, lat, lon):
+        """Convert lat/lon degrees (east positive, any shape, broadcast together) to ``(line, element)``.
+
+        The result is in AREA (file) coordinates. NaN where the point is not seen from the satellite (with the test of
+        the Java, which compares with the height of the satellite above the equatorial radius), or the input is NaN.
+        """
+        lat, lon = np.broadcast_arrays(np.asarray(lat, dtype=float), np.asarray(lon, dtype=float))
+        r, h, rp = _MSAT_EARTH_RADIUS, _MSAT_H, _MSAT_RP
+        rs = r + h
+        with np.errstate(invalid='ignore', divide='ignore'):
+            xfi = np.radians(lat)
+            xla = np.radians(lon - self.sublon)
+            rom = r * rp / np.sqrt(rp * rp * np.cos(xfi) * np.cos(xfi) + r * r * np.sin(xfi) * np.sin(xfi))
+            y = np.sqrt(h * h + rom * rom - 2.0 * h * rom * np.cos(xfi) * np.cos(xla))
+            invisible = (y * y + rom * rom) > h * h
+            teta = np.arctan((rp / r) * np.tan(xfi))
+            xt = r * np.cos(teta) * np.cos(xla)
+            yt = r * np.cos(teta) * np.sin(xla)
+            zt = rp * np.sin(teta)
+            px = np.arctan(yt / (xt - rs))
+            py = np.arctan(-zt / (xt - rs) * np.cos(px))
+            xele = self.coff / 10.0 + np.degrees(px) / self.deltax
+            xlin = self.loff / 10.0 + np.degrees(py) / self.deltay
+            rlin = 11136.0 - (xlin * 3.0 - 2.0) + 1.0
+            rele = 11136.0 - (xele * 3.0 - 2.0) + 1.0
+        return self._image_to_area(np.where(invisible, np.nan, rlin), np.where(invisible, np.nan, rele))
+
+    def toLatLon(self, linele=None):
+        """Convert ``[[elements], [lines]]`` (file coordinates; elements first) to ``[[lats], [lons]]``."""
+        lat, lon = self.to_latlon(linele[self.indexLine], linele[self.indexEle])
+        out = [None, None]
+        out[self.indexLat], out[self.indexLon] = lat, lon
+        return out
+
+    def toLinEle(self, latlon=None):
+        """Convert ``[[lats], [lons]]`` to ``[[elements], [lines]]`` in file coordinates."""
+        line, elem = self.to_lin_ele(latlon[self.indexLat], latlon[self.indexLon])
+        out = [None, None]
+        out[self.indexLine], out[self.indexEle] = line, elem
+        return out
+
+    def toLatLon2(self, lines=None, cols=None):
+        """Array version of :meth:`toLatLon`: ``lines`` and ``cols`` (broadcast together) to ``(lat, lon)``."""
+        return self.to_latlon(lines, cols)
+
+    def toLinEle2(self, lats=None, lons=None):
+        """Array version of :meth:`toLinEle`: ``lats`` and ``lons`` to ``(lines, cols)``, NaN where not visible."""
+        return self.to_lin_ele(lats, lons)

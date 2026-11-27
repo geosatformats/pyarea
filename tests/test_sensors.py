@@ -63,7 +63,8 @@ def test_pre_gvar_numbers_are_sms_and_goes_1_to_7():
 @pytest.mark.parametrize(
     ("number", "satellite", "band", "short_name"),
     [(17, "SMS-1", "IR", "SMS-1"), (32, "GOES-7", "VIS", "GOES-7"), (70, "GOES-8", None, "GOES8"),
-     (15, "ATS 6", "IR", None), (65, "NOAA-15", None, "NOAA-15"), (99, None, None, "")])
+     (15, "ATS 6", "IR", "ATS 6"), (13, "GMS", "IR", "GMS"), (65, "NOAA-15", None, "NOAA-15"),
+     (99, None, None, "")])
 def test_directory_properties(tmp_path, number, satellite, band, short_name):
     """The directory reports platform and band from its sensor number."""
     area = AreaFile(write_area_file(tmp_path / "x.AREA", FakeArea(number, mode_a_data([100]), **IR_WINDOW)))

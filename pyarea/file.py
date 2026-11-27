@@ -7,6 +7,8 @@ from io import BytesIO
 import numpy as np
 
 from pyarea.calibration import (
+    Calibrator,
+    DefaultCalibrator,
     GOESCalibrator,
     GVARCalibrator,
     cal_type_from_name,
@@ -49,6 +51,8 @@ class AreaFile(BytesIO):
 
         self.directory = area_directory(self.getbuffer()[:DIRECTORY_BYTES])
         self.adir_bytes = self.directory.dir_bytes
+        for problem in self.directory.check(self.sz):
+            logger.warning('%s: %s', self.source, problem)
 
         # as per http://www.ssec.wisc.edu/mcidas/doc/prog_man/current/formats-1.html#34971
         # after the directory bytes the blocks are, in order: nav, cal, aux, data, comments
@@ -145,13 +149,18 @@ class AreaFile(BytesIO):
         return np.frombuffer(raw, dtype=np.uint8).reshape(self.lines, self.line_len)
 
     def _pixel_array(self):
-        """The pixels as a native-endian ``(lines, elements, bands)`` array (BIP, as in the file)."""
-        if self.datawidth not in (1, 2):
+        """The pixels as a native-endian ``(lines, elements, bands)`` array (BIP, as in the file).
+
+        As in VisAD, 1- and 2-byte values are unsigned and 4-byte values (RAD from an ADDE server, times the
+        directory's scaling) are signed.
+        """
+        if self.datawidth not in (1, 2, 4):
             raise NotImplementedError(f'{self.source}: {self.datawidth} bytes per element is not supported.')
         pixel_bytes = self._line_array()[:, self.line_prefix_len:self.line_prefix_len + self.line_data_len]
         if self.datawidth == 1:
             return pixel_bytes.reshape(self.lines, self.elements, self.num_bands)
-        file_dtype = np.dtype(f'{self.directory.byte_order}u2')
+        kind = 'i' if self.datawidth == 4 else 'u'
+        file_dtype = np.dtype(f'{self.directory.byte_order}{kind}{self.datawidth}')
         pixels = pixel_bytes.copy().view(file_dtype).reshape(self.lines, self.elements, self.num_bands)
         return pixels.astype(file_dtype.newbyteorder('='), copy=False)
 
@@ -210,7 +219,7 @@ class AreaFile(BytesIO):
 
     @property
     def npdtype(self):
-        return f'{self.directory.byte_order}u{self.datawidth}'
+        return f'{self.directory.byte_order}{"i" if self.datawidth == 4 else "u"}{self.datawidth}'
 
 
     @property
@@ -231,7 +240,8 @@ class AreaFile(BytesIO):
         Raises ``NotImplementedError`` for a nav block of a type pyarea has no navigation for.
         """
         if self.areaNav is None and self.nav is not None:
-            nav = AreaNav(navblock=self.nav, byte_order=self.directory.byte_order, int_format=self.INTEGER_FORMAT)
+            nav = AreaNav(navblock=self.nav, auxblock=self.aux, byte_order=self.directory.byte_order,
+                          int_format=self.INTEGER_FORMAT)
             nav.setImageStart(self.directory.line_ul, self.directory.element_ul)
             nav.setRes(*self.resolution)
             nav.setMag(1, 1)
@@ -417,6 +427,8 @@ class AreaFile(BytesIO):
         if self.source_type in ('AAA', 'VAS'):
             raise NotImplementedError(f'{self.source}: this is a multiband {self.source_type!r} file; use '
                                       f'read_ir_temperature_aaa() or read_ir_temperature_aa().')
+        if self.cal_type.upper() == 'TEMP':  # McFETCH already calibrated it
+            return self.read_calibrated('TEMP')
         counts = self.read_data()
         if counts.max() > 255:
             raise ValueError(f'{self.source}: raw values exceed 8 bits (max {counts.max()}).')
@@ -440,11 +452,26 @@ class AreaFile(BytesIO):
         Returns:
             float32 array of shape ``(lines, elements)``; use ``calibrated_unit`` for its unit.
         """
+        out = cal_type_from_name(units)
+        held = self.cal_type.upper()
+        if self.source_type != 'GVAR' or held in ('TEMP', 'RAD', 'ALB'):
+            # a file that already holds what is asked for (a McFETCH file in TEMP, GVAR or not) gives its own
+            # pixels; only raw GVAR files are calibrated here. ADDE stores TEMP, RAD and ALB as integers times
+            # the directory's scaling (word 59: a GOES-16 TEMP file has 19241 for 192.41 K and a
+            # scaling of 100), so those are divided by it.
+            if held != units.strip().upper():
+                raise ValueError(f'{self.source}: the file holds {held or "unknown"} data and '
+                                 f'only raw GVAR files can be calibrated to {units.strip().upper()}.')
+            data = self.read_data()
+            scale = self.directory.calibration_scale_factor
+            if out in (Calibrator.CAL_TEMP, Calibrator.CAL_RAD, Calibrator.CAL_ALB) and scale != 1:
+                # divide the integers, not their float32 copy: 4-byte values can have more than 24 bits
+                return (data.astype(np.float64) / scale).astype(np.float32)
+            return DefaultCalibrator().calibrate_array(data, band, out)
         if band is None:
             if self.num_bands != 1:
                 raise ValueError(f'{self.source}: this file has {self.num_bands} bands; pass band=.')
             band = self.directory.bands[0]
-        out = cal_type_from_name(units)
         return self.gvar_calibrator.calibrate_array(self.read_data(), band, out)
 
     def read_vis(self, calibration='counts'):
@@ -472,7 +499,7 @@ class AreaFile(BytesIO):
         return nav
 
     def get_lonlats(self, lines=None, elems=None):
-        """Earth-locate pixels with the pre-GVAR GOES navigation.
+        """Earth-locate pixels with the file's navigation (GOES, GVAR, GMSX, ABIN or RECT).
 
         Args:
             lines: 0-based line indices in this file; all present lines by default.
@@ -480,12 +507,21 @@ class AreaFile(BytesIO):
 
         Returns:
             ``(lon, lat)`` in degrees, shape ``(len(lines), len(elems))``, NaN off the earth.
+
+        Raises:
+            ValueError: the file has no navigation block.
+            NotImplementedError: the navigation has no vectorized ``to_latlon`` (every navigation pyarea ports has one).
         """
-        nav = self._goes_nav()
+        nav = self.navigation
+        if nav is None:
+            raise ValueError(f'{self.source}: there is no navigation block.')
+        if not hasattr(nav, 'to_latlon'):
+            raise NotImplementedError(f'{self.source}: {type(nav).__name__} cannot Earth-locate arrays yet; '
+                                      'use its toLatLon.')
         lines = np.arange(self.lines) if lines is None else lines
         elems = np.arange(self.elements) if elems is None else elems
         line_grid, elem_grid = np.meshgrid(lines, elems, indexing='ij')
-        # file lines and elements are counted from 0 here, as in VisAD's GOESnav; the navigation adds the ul
+        # file lines and elements are counted from 0 here, as in VisAD's AREAnav; the navigation adds the ul
         # line/element and the resolution itself. (Earlier versions added 1, which moved every pixel by one.)
         lat, lon = nav.to_latlon(line_grid, elem_grid)
         return lon, lat
@@ -507,6 +543,18 @@ class AreaFile(BytesIO):
     @property
     def creation_datetime(self):
         return self.directory.creation_time
+
+    def _data_block_bytes(self):
+        """The data block as it goes in the file: each line's prefix as read, then its pixels in the file's byte
+        order and band-interleaved by pixel, from ``self.data`` (so a changed ``data`` is saved)."""
+        block = np.array(self._line_array())  # a copy: it keeps the line prefixes
+        pixels = np.asarray(self.data).transpose(1, 2, 0)  # (lines, elements, bands)
+        if self.datawidth != 1:
+            kind = 'i' if self.datawidth == 4 else 'u'
+            pixels = pixels.astype(np.dtype(f'{self.directory.byte_order}{kind}{self.datawidth}'))
+        pixel_bytes = np.ascontiguousarray(pixels).view(np.uint8).reshape(self.lines, self.line_data_len)
+        block[:, self.line_prefix_len:self.line_prefix_len + self.line_data_len] = pixel_bytes
+        return block.tobytes()
 
     def save(self, to_file_path=None, compress_level=None):
         """
@@ -535,10 +583,7 @@ class AreaFile(BytesIO):
                     aft.write(self.aux_bytes)
                 #if theer is not datLoc there si not AreaFile
                 aft.seek(self.data_offset)
-                #TODO line prefix bytes
-
-                for bi in range(self.num_bands):
-                    aft.write(self.data[bi,:,:].tobytes())
+                aft.write(self._data_block_bytes())
 
 
             if compress_level is not None:

@@ -31,6 +31,8 @@ W_CAL_LEN = 49
 W_SOURCE_TYPE = 51
 W_CAL_TYPE = 52
 W_CAL_OFFSET = 62
+W_AUX_OFFSET = 59
+W_AUX_LENGTH = 60
 DIR_WORDS = 64
 NAV_WORDS = 128
 CAL_WORDS = 128
@@ -67,6 +69,7 @@ class FakeArea:
     claimed_lines: int | None = None
     endian: str = ">"
     nav_words: np.ndarray | None = None
+    aux_words: np.ndarray | None = None  # the aux block as 32-bit words (float tables as their bit patterns)
 
 
 def make_nav_words(skew_word=0):
@@ -103,7 +106,7 @@ def _pack(words, endian):
     return np.asarray(words).astype(f"{endian}i4").tobytes()
 
 
-def _directory(spec, nav_offset, cal_offset, data_offset):
+def _directory(spec, nav_offset, cal_offset, data_offset, aux_offset=0):
     words = np.zeros(DIR_WORDS, dtype=np.int64)
     nlines = spec.data.shape[0]
     words[W_SENSOR] = spec.sensor_source
@@ -124,6 +127,9 @@ def _directory(spec, nav_offset, cal_offset, data_offset):
     words[W_DOC_LEN] = spec.doc_len
     words[W_CAL_LEN] = spec.cal_len
     words[W_CAL_OFFSET] = cal_offset
+    if spec.aux_words is not None:
+        words[W_AUX_OFFSET] = aux_offset
+        words[W_AUX_LENGTH] = len(spec.aux_words) * 4
     raw = bytearray(_pack(words, spec.endian))
     # source and calibration types are plain ASCII, independent of byte order
     raw[W_SOURCE_TYPE * 4:W_SOURCE_TYPE * 4 + 4] = spec.source_type.ljust(4).encode("ascii")
@@ -135,14 +141,19 @@ def write_area_file(path, spec):
     """Write a fake AREA file and return its path as a string."""
     nav_offset = DIR_WORDS * 4
     cal_offset = nav_offset + NAV_WORDS * 4 if spec.cal_words is not None else 0
-    data_offset = (cal_offset + CAL_WORDS * 4) if spec.cal_words is not None else nav_offset + NAV_WORDS * 4
+    after_cal = (cal_offset + CAL_WORDS * 4) if spec.cal_words is not None else nav_offset + NAV_WORDS * 4
+    aux_offset = after_cal if spec.aux_words is not None else 0
+    data_offset = after_cal + (len(spec.aux_words) * 4 if spec.aux_words is not None else 0)
 
     nav_words = make_nav_words() if spec.nav_words is None else spec.nav_words
-    nav = b"GOES" + _pack(nav_words[1:], spec.endian)
+    nav_type = int(nav_words[0]).to_bytes(4, "big") if nav_words[0] else b"GOES"  # the type as text, always
+    nav = nav_type + _pack(nav_words[1:], spec.endian)
 
-    blocks = [_directory(spec, nav_offset, cal_offset, data_offset), nav]
+    blocks = [_directory(spec, nav_offset, cal_offset, data_offset, aux_offset), nav]
     if spec.cal_words is not None:
         blocks.append(_pack(spec.cal_words, spec.endian))
+    if spec.aux_words is not None:
+        blocks.append(_pack(spec.aux_words, spec.endian))
     pixels = spec.data.astype(f"{spec.endian}u{spec.bytes_per_elem}")
     for line in range(spec.data.shape[0]):
         if spec.prefixes is not None:

@@ -27,14 +27,17 @@ from pyarea import AreaFile
 
 area = AreaFile("path/to/file.AREA")
 print(area)                     # the directory
-data = area.read_data()         # counts, shape (bands, lines, elements)
+data = area.read_data()         # the pixels of a single band file, shape (lines, elements)
 ```
+
+The pixels are 1, 2 or 4 bytes wide. `area.data` holds all the bands, shape 
+`(bands, lines, elements)`.
 
 ### Navigation
 
 `area.navigation` gives the navigation object of the file's nav block 
 (`None` if the file has none). Lines and elements are those of the AREA 
-file (1-based), and the navigation applies the file's start and resolution 
+file, counted from 0, and the navigation applies the file's start and resolution 
 itself:
 
 ```python
@@ -44,33 +47,66 @@ line, elem = nav.to_lin_ele(lat, lon)     # east longitudes are positive
 ```
 
 The Java style methods (`toLatLon`, `toLinEle`, taking lists) are there as well. 
-`area.get_lonlats()` earth-locates the whole image of a pre-GVAR GOES file.
+`area.get_lonlats()` earth-locates the whole image with the file's own navigation, 
+whatever its type (or only the given `lines=` and `elems=`), and returns `(lon, lat)`:
+
+```python
+import numpy as np
+
+lon, lat = area.get_lonlats()                       # arrays of shape (lines, elements), NaN off the Earth
+lon, lat = area.get_lonlats(lines=np.arange(0, area.lines, 4), elems=np.arange(0, area.elements, 4))
+```
 
 Currently implemented navigations:
 
-| Nav type | Class        | Satellites                                      |
-|----------|--------------|-------------------------------------------------|
-| `GVAR`   | `GVARNav`    | GOES-8 and later                                |
-| `GOES`   | `GOESNav`    | SMS and GOES-1 to 7 (pre-GVAR)                  |
-| `GMSX`   | `GMSXNav`    | GMS-5 stretched VISSR                           |
-| `RECT`   | `RECTNav`    | rectilinear (lat/lon) grids                     |
+| Nav type | Class        | Satellites                                                          |
+|----------|--------------|---------------------------------------------------------------------|
+| `GVAR`   | `GVARNav`    | GOES-8 and later (GVAR)                                             |
+| `GOES`   | `GOESNav`    | SMS and GOES-1 to 7 (pre-GVAR)                                      |
+| `GMSX`   | `GMSXNav`    | GMS-5 and FY satellites                                             |
+| `RECT`   | `RECTNav`    | rectilinear (lat/lon) grids                                         |
+| `ABIN`   | `ABINNav`    | GOES-R ABI fixed grid (GOES-16 and later)                           |
+| `GEOS`   | `GEOSNav`    | Himawari, COMS-1 (LRIT/HRIT layout)                                 |
+| `LALO`   | `LALONav`    | Kalpana-1 and others: tables of latitude and longitude in the aux block |
+| `MSAT`   | `MSATNav`    | Meteosat first generation (Meteosat-1 to 7)                         |
+| `MSGT`   | `MSGTNav`    | Meteosat second generation (Meteosat-8 to 11)                       |
 
+Any other nav type raises `NotImplementedError` and names the ones that are supported.
+All of these have `to_latlon` and `to_lin_ele` for numpy arrays, which `get_lonlats` uses.
 
 ### Calibration
+
+SSEC's McFETCH can give a calibrated area file (with the option "UNIT") like ADDE. 
+The directory's calibration type (`area.cal_type`) tells what the file has 
+(`TEMP`, `ALB`, `RAD`, `BRIT` or `RAW`). 
+
+```python
+area = AreaFile("mcfetch_band04.area")
+print(area.cal_type, area.directory.calibration_scale_factor)   # TEMP 100
+kelvin = area.read_calibrated("TEMP")      # a file already in TEMP: its pixels divided by the scaling, float32
+lon, lat = area.get_lonlats()
+```
+
+For a file that already holds the requested unit, `read_calibrated` returns its pixels 
+divided by the scaling,  and asking for another type raises a `ValueError`. 
+`area.directory.check(file_size)` lists problems it finds in a directory (an unknown sensor, 
+an unsupported pixel width, block offsets outside the file).
+
+Area files that were ordered from NOAA CLASS only come in `RAW`, and needs to be calibrated: 
 
 ```python
 temperature = area.read_calibrated("TEMP")   # GVAR imagery: 'RAW', 'RAD', 'ALB', 'TEMP' or 'BRIT'
 reflectance = area.read_vis("unnormalized_reflectance")   # a pre-GVAR visible image
 ```
 
-The calibration is **not** a port of the Java package, and comes in two parts:
+Calibrations currently implemented:
 
-* `GVARCalibrator` (GOES-8 and later, GVAR) is a vectorized port of VisAD's 
+* `GVARCalibrator` (GOES-8 and later, GVAR), a vectorized port of VisAD's 
   `CalibratorGvar`.
-* `GOESCalibrator` (SMS and GOES-1 to 7) is new code, as the Java package does 
-  not read these data. It covers Mode A (VISR), Mode AA (VAS, GOES-4 to 6) and 
-  Mode AAA (VAS, GOES-6 and 7). The visible channel only has a relative reflectance, 
-  there is no calibration to albedo for these satellites.
+* `GOESCalibrator` (SMS and GOES-1 to 7), new code that covers Mode A (VISR), 
+  Mode AA (VAS, GOES-4 to 6) and Mode AAA (VAS, GOES-6 and 7). The visible channel 
+  only has a relative reflectance; there is no calibration to albedo for these 
+  satellites.
 
 ## License
 

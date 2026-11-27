@@ -27,29 +27,40 @@ class Calibrator(object):
 
 
 class DefaultCalibrator(Calibrator):
+    """The calibrator for sensors without one of their own: values pass through unchanged.
+
+    Like ``edu.wisc.ssec.mcidas.CalibratorDefault`` every value is returned as it is, pre-calibrated or not, whatever
+    ``band`` and ``calTypeOut`` ask for, so a file that already holds TEMP gives its own pixels. One deliberate
+    difference: VisAD gives 0 until ``setCalType`` has been called (its calibration type is an unset static field),
+    here the values pass through then as well. ``isPreCalibrated`` is only kept for the callers that read it.
+    """
     curCalType = 0
+    isPreCalibrated = False
 
     def setCalType(self, calType):
+        """Set the calibration type of the input data; returns 0, or -1 for a type that does not exist."""
         if calType < Calibrator.CAL_MIN or calType > Calibrator.CAL_MAX:
             return -1
         self.curCalType = calType
+        return 0
 
-    def calibrate_pixel(self, inputPixel, band, calTypeOut ):
+    def calibrate_pixel(self, inputPixel, band, calTypeOut):
         """
             Calibrate one pixel
         """
-        if self.curCalType in [self.CAL_RAW, self.CAL_RAD, self.CAL_ALB, self.CAL_TEMP, self.CAL_BRIT]:
-            return inputPixel
-        else:
-            return 0.
-
+        return inputPixel
 
     def calibrate_array(self, input_array, band, calTypeOut):
+        """:meth:`calibrate_pixel` for an array; returns a float32 array of the same shape."""
+        return np.array(input_array, dtype=np.float32)
 
-        out = list()
-        for e in input_array:
-            out.append(self.calibrate_pixel(e,band, calTypeOut))
-        return  out
+    def calibratedList(self, band, isPreCal=None):
+        """The calibration types on offer: raw and brightness, however ``isPreCal`` is set."""
+        return [self.CAL_RAW, self.CAL_BRIT]
+
+    def calibratedUnit(self, calType):
+        """There is no unit for any type."""
+        return None
 
 
 # Planck constants of the GOES-8 to 15 imagers (5 bands, band 1 is the visible and unused) and sounders (18 bands),
@@ -300,9 +311,13 @@ def calibrated_unit(cal_type):
 
 
 def brit_to_temperature(brit):
-    """Brightness (0-255) to temperature in K, the inverse of the IR brightness formula."""
-    brit = np.asarray(brit, dtype=np.float32)
-    return np.where(brit > 176, 418.0 - brit, (660.0 - brit) / 2.0)
+    """Brightness (0-255) to temperature in K, the inverse of the IR brightness formula.
+
+    Like ``CalibratorDefault.convertBritToTemp`` in VisAD the brightness is truncated to an integer, and
+    ``(660 - brit) / 2`` is an integer division, so odd brightnesses below 176 lose half a kelvin (1 gives 329 K).
+    """
+    brit = np.trunc(np.asarray(brit, dtype=np.float32))
+    return np.where(brit > 176, 418.0 - brit, np.trunc((660.0 - brit) / 2.0))
 
 
 def temperature_to_brit(temperature):
