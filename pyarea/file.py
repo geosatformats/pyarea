@@ -427,6 +427,8 @@ class AreaFile(BytesIO):
         if self.source_type in ('AAA', 'VAS'):
             raise NotImplementedError(f'{self.source}: this is a multiband {self.source_type!r} file; use '
                                       f'read_ir_temperature_aaa() or read_ir_temperature_aa().')
+        if self.cal_type.upper() == 'TEMP':  # McFETCH already calibrated it
+            return self.read_calibrated('TEMP')
         counts = self.read_data()
         if counts.max() > 255:
             raise ValueError(f'{self.source}: raw values exceed 8 bits (max {counts.max()}).')
@@ -451,13 +453,15 @@ class AreaFile(BytesIO):
             float32 array of shape ``(lines, elements)``; use ``calibrated_unit`` for its unit.
         """
         out = cal_type_from_name(units)
-        if self.source_type != 'GVAR':
-            # no calibration here, but a file that already holds what is asked for (a McFETCH file in TEMP, say)
-            # gives its own pixels. ADDE stores TEMP, RAD and ALB as integers times the directory's scaling
-            # (word 59: a GOES-16 TEMP file has 19241 for 192.41 K and a scaling of 100), so those are divided by it.
-            if self.cal_type.upper() != units.strip().upper():
-                raise ValueError(f'{self.source}: the file holds {self.cal_type or "unknown"} data and '
-                                 f'only GVAR files can be calibrated to {units.strip().upper()}.')
+        held = self.cal_type.upper()
+        if self.source_type != 'GVAR' or held in ('TEMP', 'RAD', 'ALB'):
+            # a file that already holds what is asked for (a McFETCH file in TEMP, GVAR or not) gives its own
+            # pixels; only raw GVAR files are calibrated here. ADDE stores TEMP, RAD and ALB as integers times
+            # the directory's scaling (word 59: a GOES-16 TEMP file has 19241 for 192.41 K and a
+            # scaling of 100), so those are divided by it.
+            if held != units.strip().upper():
+                raise ValueError(f'{self.source}: the file holds {held or "unknown"} data and '
+                                 f'only raw GVAR files can be calibrated to {units.strip().upper()}.')
             data = self.read_data()
             scale = self.directory.calibration_scale_factor
             if out in (Calibrator.CAL_TEMP, Calibrator.CAL_RAD, Calibrator.CAL_ALB) and scale != 1:

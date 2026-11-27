@@ -186,7 +186,7 @@ def test_read_calibrated_gives_the_stored_pixels_when_the_file_already_holds_tha
     assert temperature.dtype == np.float32
     np.testing.assert_array_equal(temperature, area.read_data().astype(np.float32))
     assert set(np.unique(temperature)) == set(values)
-    with pytest.raises(ValueError, match='only GVAR files can be calibrated'):
+    with pytest.raises(ValueError, match='only raw GVAR files can be calibrated'):
         area.read_calibrated('RAD')
 
 
@@ -239,3 +239,32 @@ def test_read_calibrated_scales_four_byte_radiance(tmp_path):
     radiance = AreaFile(path).read_calibrated('RAD')
     assert radiance.dtype == np.float32
     np.testing.assert_allclose(sorted(set(np.unique(radiance))), [2500.0, 123456.789], rtol=1e-7)
+
+
+def test_gvar_file_already_calibrated_by_mcfetch_gives_its_own_pixels(tmp_path):
+    from pyarea.file import AreaFile
+    from tests.fake_area_files import GOES7_IR, IR_WINDOW, SHAPE, FakeArea, patch_dir_word, write_area_file
+
+    columns = np.resize(np.array([19241, 31184], dtype=np.uint16), SHAPE[1])
+    data = np.tile(columns[None, :, None], (SHAPE[0], 1, 1))
+    path = write_area_file(tmp_path / 'gvar_temp.area',
+                           FakeArea(GOES7_IR, data, source_type='GVAR', cal_type='TEMP', bytes_per_elem=2,
+                                    **IR_WINDOW))
+    patch_dir_word(path, 58, 100)
+    area = AreaFile(path)
+    assert area.source_type == 'GVAR'
+    assert set(np.unique(area.read_calibrated('TEMP'))) == {np.float32(192.41), np.float32(311.84)}
+    with pytest.raises(ValueError, match='only raw GVAR files'):
+        area.read_calibrated('RAD')
+
+
+def test_pregvar_readers_use_a_mcfetch_calibrated_file(tmp_path):
+    from pyarea.file import AreaFile
+    from tests.fake_area_files import GOES7_IR, IR_WINDOW, SHAPE, FakeArea, write_area_file
+
+    columns = np.resize(np.array([250, 300], dtype=np.uint16), SHAPE[1])
+    data = np.tile(columns[None, :, None], (SHAPE[0], 1, 1))
+    path = write_area_file(tmp_path / 'temp.area',
+                           FakeArea(GOES7_IR, data, cal_type='TEMP', bytes_per_elem=2, **IR_WINDOW))
+    temperature = AreaFile(path).read_ir_temperature_a()
+    assert set(np.unique(temperature)) == {250.0, 300.0}
